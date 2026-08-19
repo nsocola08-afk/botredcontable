@@ -21,8 +21,15 @@ Requerimientos implementados:
        en los documentos.
 4. Muestra la fuente principal de S3 usada (nombre + fragmento) y, si se
    consultó más de un archivo, un contador "(+N archivos más leídos)".
+5. Permite adjuntar una imagen (recibo, balance, ejercicio, captura de la
+   plataforma) junto al mensaje de texto. Como retrieve_and_generate no
+   acepta imágenes, en ese caso se usa Nova 2 Lite en modo visión vía
+   bedrock_runtime.converse(), reforzado con fragmentos de la Knowledge
+   Base como contexto de apoyo cuando también hay texto (ver
+   analizar_imagen y obtener_contexto_kb).
 """
 
+import base64
 import re
 import urllib.parse
 
@@ -99,6 +106,32 @@ MENSAJE_RECHAZO = (
     "Lo siento, solo puedo responder preguntas de contabilidad, finanzas y costos "
     "basadas en los documentos oficiales de la Universidad Redcontable cargados en el sistema."
 )
+
+# =========================================================
+# Configuración para adjuntar imágenes (recibos, balances, ejercicios, etc.)
+# =========================================================
+# Nova 2 Lite es multimodal (acepta imágenes), pero la Knowledge Base
+# (retrieve_and_generate) NO acepta imágenes en su "input": solo texto. Por
+# eso, cuando el usuario adjunta una imagen, se usa un flujo aparte que llama
+# directamente a bedrock_runtime.converse() con la imagen + el prompt del
+# profesor (ver analizar_imagen), en vez del flujo normal de
+# retrieve_and_generate. Si además el usuario escribió texto, se intenta
+# reforzar la respuesta con un retrieve() de apoyo (ver obtener_contexto_kb).
+FORMATOS_IMAGEN_PERMITIDOS = ["png", "jpg", "jpeg", "webp"]
+
+# Límite conservador de tamaño por imagen (MB) para evitar el error de
+# Bedrock cuando la imagen es demasiado pesada.
+MAX_IMAGEN_MB = 4
+
+# Bedrock Converse espera el "format" de la imagen como png/jpeg/webp/gif
+# (sin el prefijo "image/"), y no reconoce "jpg" como válido: hay que
+# mapearlo a "jpeg".
+_EXT_A_FORMATO_BEDROCK = {
+    "png": "png",
+    "jpg": "jpeg",
+    "jpeg": "jpeg",
+    "webp": "webp",
+}
 
 # =========================================================
 # 2. ESTILOS (tema rojo y blanco)
@@ -208,7 +241,10 @@ if "messages" not in st.session_state:
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+        if message.get("imagen_b64"):
+            st.image(base64.b64decode(message["imagen_b64"]))
+        if message.get("content"):
+            st.markdown(message["content"])
 
 # =========================================================
 # 5. CLASIFICACIÓN DE TEMA (paso 1) — filtro híbrido
@@ -651,6 +687,124 @@ def formatear_fuentes(fuentes: list) -> str:
     return bloque
 
 
+def formato_imagen_bedrock(nombre_archivo: str) -> str:
+    """Convierte la extensión del archivo subido al 'format' que espera el
+    bloque de imagen de Bedrock Converse ('png', 'jpeg', 'webp')."""
+    extension = nombre_archivo.rsplit(".", 1)[-1].lower()
+    return _EXT_A_FORMATO_BEDROCK.get(extension, "jpeg")
+
+
+def obtener_contexto_kb(pregunta: str, max_fragmentos: int = 4):
+    """
+    Hace un retrieve() (sin generación) sobre la Knowledge Base para usar sus
+    fragmentos como contexto de APOYO cuando la imagen viene acompañada de
+    una pregunta de texto. Devuelve (texto_contexto, lista_de_fuentes).
+
+    Si falla o no hay resultados, devuelve ("", []) sin romper el flujo: la
+    imagen se sigue pudiendo analizar solo con el modelo de visión.
+    """
+    if not pregunta:
+        return "", []
+
+    try:
+        resp = bedrock_agent.retrieve(
+            knowledgeBaseId=KB_ID,
+            retrievalQuery={"text": pregunta},
+            retrievalConfiguration={
+                "vectorSearchConfiguration": {"numberOfResults": max_fragmentos}
+            },
+        )
+    except Exception:
+        return "", []
+
+    fragmentos = []
+    fuentes = []
+    for r in resp.get("retrievalResults", []):
+        texto = r.get("content", {}).get("text", "")
+        if not texto:
+            continue
+        fragmentos.append(texto)
+
+        s3_uri = r.get("location", {}).get("s3Location", {}).get("uri", "")
+        if s3_uri:
+            nombre_archivo = urllib.parse.unquote(s3_uri.split("/")[-1])
+            if nombre_archivo not in [f["nombre"] for f in fuentes]:
+                fuentes.append({"nombre": nombre_archivo, "fragmento": texto[:150].strip()})
+
+    return "\n\n".join(fragmentos), fuentes
+
+
+# Instrucción adicional que se agrega a PROMPT_PROFESOR únicamente cuando la
+# consulta incluye una imagen (recibo, balance, ejercicio, captura de la
+# plataforma, etc.).
+PROMPT_PROFESOR_IMAGEN_EXTRA = (
+    "\n\nADEMÁS, en este caso el usuario adjuntó una IMAGEN (foto o captura de "
+    "un recibo, estado financiero, ejercicio de contabilidad, o de la "
+    "plataforma). Analiza la imagen con cuidado y responde sobre su contenido "
+    "aplicando tus conocimientos de contabilidad, finanzas y costos, igual que "
+    "harías con una pregunta de texto sobre el mismo tema. Si la imagen NO "
+    "tiene ninguna relación con contabilidad, finanzas, costos o la vida "
+    "académica de la universidad, responde EXACTA y ÚNICAMENTE con este "
+    f'mensaje, sin nada más: "{MENSAJE_RECHAZO}"'
+)
+
+
+def analizar_imagen(pregunta: str, archivo, contexto_kb: str = "") -> str:
+    """
+    Analiza una imagen adjunta (con o sin pregunta de texto) usando Nova 2
+    Lite en modo multimodal, vía bedrock_runtime.converse(). Se usa converse
+    en vez de retrieve_and_generate porque este último no acepta imágenes.
+
+    Si contexto_kb no está vacío (fragmentos recuperados con
+    obtener_contexto_kb a partir de la pregunta de texto), se agrega como
+    apoyo adicional, sin ser la única fuente para analizar la imagen.
+    """
+    formato = formato_imagen_bedrock(archivo.name)
+    imagen_bytes = archivo.getvalue()
+
+    texto_usuario = (
+        pregunta.strip()
+        if pregunta and pregunta.strip()
+        else (
+            "Analiza esta imagen (documento, recibo, estado financiero o "
+            "ejercicio) y explica lo que corresponda desde el punto de vista "
+            "contable/financiero."
+        )
+    )
+    if contexto_kb:
+        texto_usuario += (
+            "\n\nContexto adicional de documentos oficiales (puede o no ser "
+            f"relevante para esta imagen):\n{contexto_kb}"
+        )
+
+    contenido = [
+        {"image": {"format": formato, "source": {"bytes": imagen_bytes}}},
+        {"text": texto_usuario},
+    ]
+
+    parametros_converse = {
+        "modelId": MODEL_ARN_GENERACION,
+        "system": [{"text": PROMPT_PROFESOR + PROMPT_PROFESOR_IMAGEN_EXTRA}],
+        "messages": [{"role": "user", "content": contenido}],
+        "inferenceConfig": {"maxTokens": 1000, "temperature": 0.0},
+    }
+    if REASONING_EFFORT_GENERACION:
+        parametros_converse["additionalModelRequestFields"] = {
+            "reasoningConfig": {
+                "type": "enabled",
+                "maxReasoningEffort": REASONING_EFFORT_GENERACION,
+            }
+        }
+
+    response = bedrock_runtime.converse(**parametros_converse)
+    bloques = response.get("output", {}).get("message", {}).get("content", [])
+    texto_respuesta = "".join(b.get("text", "") for b in bloques).strip()
+
+    texto_respuesta = limpiar_marcadores_citas(texto_respuesta)
+    texto_respuesta = quitar_nota_de_fuente_propia(texto_respuesta)
+    return texto_respuesta
+
+
 def diagnosticar_retrieve(pregunta: str):
     """
     Llama a retrieve() (SIN generación) para inspeccionar directamente qué
@@ -670,82 +824,137 @@ def diagnosticar_retrieve(pregunta: str):
 
 
 # =========================================================
-# 7. ENTRADA DE CHAT
+# 7. ENTRADA DE CHAT (texto y/o imagen adjunta)
 # =========================================================
-if prompt := st.chat_input("Escribe tu consulta de contabilidad, finanzas o costos..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+entrada = st.chat_input(
+    "Escribe tu consulta o adjunta una imagen (recibo, balance, ejercicio)...",
+    accept_file=True,
+    file_type=FORMATOS_IMAGEN_PERMITIDOS,
+)
 
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        full_response = ""
-        fuentes = []
+if entrada:
+    prompt = (entrada.text or "").strip()
+    archivos_adjuntos = entrada["files"] or []
+    archivo_imagen = archivos_adjuntos[0] if archivos_adjuntos else None
 
-        # Paso 1: clasificar tema
-        with st.spinner("Analizando tu consulta..."):
-            pregunta_valida = es_pregunta_del_tema(prompt)
+    if archivo_imagen and archivo_imagen.size > MAX_IMAGEN_MB * 1024 * 1024:
+        st.error(
+            f"⚠️ La imagen pesa más de {MAX_IMAGEN_MB} MB. Sube una versión "
+            "más liviana (puedes comprimirla o recortar solo la parte "
+            "relevante) e inténtalo de nuevo."
+        )
+    elif not prompt and not archivo_imagen:
+        # No debería pasar (chat_input exige texto o archivo), pero por
+        # seguridad no hacemos nada si ambos vienen vacíos.
+        pass
+    else:
+        # Guardamos la imagen como base64 en el historial para poder
+        # volver a mostrarla si la app se vuelve a renderizar.
+        imagen_b64_usuario = (
+            base64.b64encode(archivo_imagen.getvalue()).decode("utf-8")
+            if archivo_imagen
+            else None
+        )
+        st.session_state.messages.append(
+            {"role": "user", "content": prompt, "imagen_b64": imagen_b64_usuario}
+        )
+        with st.chat_message("user"):
+            if archivo_imagen:
+                st.image(archivo_imagen)
+            if prompt:
+                st.markdown(prompt)
 
-        if not pregunta_valida:
-            # Rechazo generado en Python: siempre exacto, nunca mezclado
-            full_response = MENSAJE_RECHAZO
-        else:
-            # Paso 2: generar respuesta con la Knowledge Base
-            with st.spinner("Consultando los documentos oficiales..."):
-                try:
-                    priorizar_malla = es_pregunta_de_malla(prompt)
-                    full_response, fuentes = consultar_knowledge_base(
-                        prompt, priorizar_malla=priorizar_malla
-                    )
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            full_response = ""
+            fuentes = []
 
-                    # Red de seguridad: si el modelo igual devolviera el
-                    # rechazo, no le agregamos fuentes ni notas contradictorias.
-                    if MENSAJE_RECHAZO.strip() not in full_response:
-                        if fuentes:
+            if archivo_imagen:
+                # ---- Flujo CON imagen: Nova 2 Lite en modo visión ----
+                # retrieve_and_generate no acepta imágenes, así que aquí no
+                # se usa consultar_knowledge_base(): se llama a
+                # analizar_imagen(), que a su vez usa bedrock_runtime.converse().
+                with st.spinner("Analizando la imagen..."):
+                    try:
+                        contexto_kb, fuentes = obtener_contexto_kb(prompt)
+                        full_response = analizar_imagen(prompt, archivo_imagen, contexto_kb)
+
+                        if MENSAJE_RECHAZO.strip() not in full_response and fuentes:
                             full_response += formatear_fuentes(fuentes)
-                        else:
-                            full_response += (
-                                "\n\n---\n_ℹ️ Se utilizaron diversas fuentes documentadas para "
-                                "esta consulta._"
-                            )
-                except Exception as e:
-                    full_response = f"⚠️ Error al consultar la Base de Conocimientos: {e}"
+                    except Exception as e:
+                        full_response = f"⚠️ Error al analizar la imagen: {e}"
+            else:
+                # ---- Flujo normal, solo texto (Knowledge Base) ----
+                # Paso 1: clasificar tema
+                with st.spinner("Analizando tu consulta..."):
+                    pregunta_valida = es_pregunta_del_tema(prompt)
 
-        full_response = escapar_signos_dolar(full_response)
-        message_placeholder.markdown(full_response)
-
-        # Mostrar el detalle de archivos adicionales, si los hubo
-        if len(fuentes) > 1:
-            with st.expander("Ver todos los archivos consultados"):
-                for archivo in fuentes:
-                    st.markdown(f"- `{archivo['nombre']}`")
-
-        # ---- Modo diagnóstico: qué devolvió retrieve() en crudo ----
-        if modo_diagnostico:
-            with st.expander("🔧 Diagnóstico: fragmentos recuperados de la Knowledge Base"):
-                resultados, error = diagnosticar_retrieve(prompt)
-                if error:
-                    st.error(f"Error al llamar a retrieve(): {error}")
-                elif not resultados:
-                    st.warning(
-                        "⚠️ retrieve() no devolvió NINGÚN fragmento para esta pregunta. "
-                        "Esto confirma que el problema es de indexación/sincronización "
-                        "(revisa el Sync del Data Source, la ruta en S3, o el índice de "
-                        "Pinecone), no del prompt ni del modelo."
-                    )
+                if not pregunta_valida:
+                    # Rechazo generado en Python: siempre exacto, nunca mezclado
+                    full_response = MENSAJE_RECHAZO
                 else:
-                    st.success(f"Se recuperaron {len(resultados)} fragmento(s).")
-                    for i, r in enumerate(resultados, start=1):
-                        score = r.get("score", "N/A")
-                        uri = (
-                            r.get("location", {})
-                            .get("s3Location", {})
-                            .get("uri", "desconocido")
-                        )
-                        texto = r.get("content", {}).get("text", "")[:200]
-                        st.markdown(
-                            f"**{i}. `{urllib.parse.unquote(uri.split('/')[-1])}`** "
-                            f"(score: `{score}`)\n\n> {texto}..."
-                        )
+                    # Paso 2: generar respuesta con la Knowledge Base
+                    with st.spinner("Consultando los documentos oficiales..."):
+                        try:
+                            priorizar_malla = es_pregunta_de_malla(prompt)
+                            full_response, fuentes = consultar_knowledge_base(
+                                prompt, priorizar_malla=priorizar_malla
+                            )
 
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+                            # Red de seguridad: si el modelo igual devolviera
+                            # el rechazo, no agregamos fuentes ni notas
+                            # contradictorias.
+                            if MENSAJE_RECHAZO.strip() not in full_response:
+                                if fuentes:
+                                    full_response += formatear_fuentes(fuentes)
+                                else:
+                                    full_response += (
+                                        "\n\n---\n_ℹ️ Se utilizaron diversas fuentes "
+                                        "documentadas para esta consulta._"
+                                    )
+                        except Exception as e:
+                            full_response = (
+                                f"⚠️ Error al consultar la Base de Conocimientos: {e}"
+                            )
+
+            full_response = escapar_signos_dolar(full_response)
+            message_placeholder.markdown(full_response)
+
+            # Mostrar el detalle de archivos adicionales, si los hubo
+            if len(fuentes) > 1:
+                with st.expander("Ver todos los archivos consultados"):
+                    for archivo in fuentes:
+                        st.markdown(f"- `{archivo['nombre']}`")
+
+            # ---- Modo diagnóstico: qué devolvió retrieve() en crudo ----
+            # Solo aplica al flujo de texto puro; con imagen usamos
+            # obtener_contexto_kb() como contexto de apoyo, no como fuente
+            # principal, así que el diagnóstico de retrieve() no aplica igual.
+            if modo_diagnostico and not archivo_imagen:
+                with st.expander("🔧 Diagnóstico: fragmentos recuperados de la Knowledge Base"):
+                    resultados, error = diagnosticar_retrieve(prompt)
+                    if error:
+                        st.error(f"Error al llamar a retrieve(): {error}")
+                    elif not resultados:
+                        st.warning(
+                            "⚠️ retrieve() no devolvió NINGÚN fragmento para esta pregunta. "
+                            "Esto confirma que el problema es de indexación/sincronización "
+                            "(revisa el Sync del Data Source, la ruta en S3, o el índice de "
+                            "Pinecone), no del prompt ni del modelo."
+                        )
+                    else:
+                        st.success(f"Se recuperaron {len(resultados)} fragmento(s).")
+                        for i, r in enumerate(resultados, start=1):
+                            score = r.get("score", "N/A")
+                            uri = (
+                                r.get("location", {})
+                                .get("s3Location", {})
+                                .get("uri", "desconocido")
+                            )
+                            texto = r.get("content", {}).get("text", "")[:200]
+                            st.markdown(
+                                f"**{i}. `{urllib.parse.unquote(uri.split('/')[-1])}`** "
+                                f"(score: `{score}`)\n\n> {texto}..."
+                            )
+
+        st.session_state.messages.append({"role": "assistant", "content": full_response})
