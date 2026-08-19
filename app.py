@@ -45,21 +45,12 @@ COLOR_FONDO = "#FFFFFF"
 AWS_REGION = "us-east-1"
 KB_ID = "2SESL9R1VO"
 
-# Modelo generador de respuestas (retrieve_and_generate). Se usa Claude
-# Sonnet 5 (modelo de Anthropic con inteligencia cercana a Opus, a un
-# costo mucho menor) para redactar la respuesta final que ve el usuario,
-# ya que es donde más se nota la calidad de redacción y el seguimiento
-# de instrucciones complejas.
-#
-# Claude Sonnet 5 no admite invocación "on-demand" directa con el ARN de
-# foundation-model; Bedrock exige un "inference profile". Por eso se arma
-# el ARN con el ID de cuenta (obtenido vía STS) y el prefijo "us." del
-# inference profile de cross-region.
-_ACCOUNT_ID = boto3.client("sts", region_name=AWS_REGION).get_caller_identity()["Account"]
-MODEL_ARN_GENERACION = (
-    f"arn:aws:bedrock:{AWS_REGION}:{_ACCOUNT_ID}:"
-    "inference-profile/us.anthropic.claude-sonnet-5"
-)
+# Modelo generador de respuestas (retrieve_and_generate). Nova Lite sigue
+# instrucciones complejas notablemente mejor que Nova Micro (más de 15
+# benchmarks a favor, incluyendo IFEval de instruction-following), con un
+# costo apenas ~1.7x mayor. Es el modelo que redacta la respuesta final
+# para el usuario, así que es donde más se nota la mejora de calidad.
+MODEL_ARN_GENERACION = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-lite-v1:0"
 
 # Modelo de clasificación rápida (SI/NO en es_pregunta_del_tema). Se deja en
 # Nova Micro a propósito: es la llamada de respaldo que más se repite y no
@@ -518,28 +509,6 @@ def _config_retrieve_and_generate(con_filtro_malla: bool) -> dict:
                         "Contexto de los documentos oficiales:\n$search_results$\n\n"
                         "Pregunta del usuario: $query$\n\n"
                         "Respuesta:"
-                    )
-                },
-            },
-            # Requerido por Bedrock cuando se usa un modelo (como Claude Sonnet 5)
-            # que todavía no tiene una plantilla de orquestación por defecto en el
-            # servicio de Knowledge Bases: sin esto, retrieve_and_generate falla con
-            # ValidationException ("Custom prompt templates must be provided for
-            # both Orchestration and Generation"). Esta etapa reformula la pregunta
-            # del usuario en una consulta de búsqueda independiente, usando el
-            # historial de la conversación si existe.
-            "orchestrationConfiguration": {
-                "promptTemplate": {
-                    "textPromptTemplate": (
-                        "Dada una conversación (si existe) y una pregunta de "
-                        "seguimiento, reformula la pregunta de seguimiento como una "
-                        "consulta de búsqueda independiente y clara, en el mismo "
-                        "idioma en que fue escrita. No respondas la pregunta, solo "
-                        "reformúlala para buscar en la base de conocimientos.\n\n"
-                        "Historial de la conversación:\n$conversation_history$\n\n"
-                        "Pregunta de seguimiento: $query$\n\n"
-                        "$output_format_instructions$\n\n"
-                        "Consulta de búsqueda independiente:"
                     )
                 },
             },
