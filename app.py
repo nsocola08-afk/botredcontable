@@ -45,12 +45,11 @@ COLOR_FONDO = "#FFFFFF"
 AWS_REGION = "us-east-1"
 KB_ID = "2SESL9R1VO"
 
-# Modelo generador de respuestas (retrieve_and_generate). Nova Lite sigue
-# instrucciones complejas notablemente mejor que Nova Micro (más de 15
-# benchmarks a favor, incluyendo IFEval de instruction-following), con un
-# costo apenas ~1.7x mayor. Es el modelo que redacta la respuesta final
-# para el usuario, así que es donde más se nota la mejora de calidad.
-MODEL_ARN_GENERACION = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-lite-v1:0"
+# Modelo generador de respuestas (retrieve_and_generate). Se usa Claude
+# Opus 5 (modelo más avanzado de Anthropic en Bedrock) para redactar la
+# respuesta final que ve el usuario, ya que es donde más se nota la
+# calidad de redacción y el seguimiento de instrucciones complejas.
+MODEL_ARN_GENERACION = "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5"
 
 # Modelo de clasificación rápida (SI/NO en es_pregunta_del_tema). Se deja en
 # Nova Micro a propósito: es la llamada de respaldo que más se repite y no
