@@ -46,10 +46,20 @@ AWS_REGION = "us-east-1"
 KB_ID = "2SESL9R1VO"
 
 # Modelo generador de respuestas (retrieve_and_generate). Se usa Claude
-# Opus 5 (modelo más avanzado de Anthropic en Bedrock) para redactar la
-# respuesta final que ve el usuario, ya que es donde más se nota la
-# calidad de redacción y el seguimiento de instrucciones complejas.
-MODEL_ARN_GENERACION = "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5"
+# Sonnet 5 (modelo de Anthropic con inteligencia cercana a Opus, a un
+# costo mucho menor) para redactar la respuesta final que ve el usuario,
+# ya que es donde más se nota la calidad de redacción y el seguimiento
+# de instrucciones complejas.
+#
+# Nota: si Bedrock llegara a exigir un "inference profile" en vez del ARN
+# directo (error de "on-demand throughput not supported"), reemplaza la
+# línea de abajo por:
+#   account_id = boto3.client("sts").get_caller_identity()["Account"]
+#   MODEL_ARN_GENERACION = (
+#       f"arn:aws:bedrock:{AWS_REGION}:{account_id}:"
+#       "inference-profile/us.anthropic.claude-sonnet-5"
+#   )
+MODEL_ARN_GENERACION = "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-5"
 
 # Modelo de clasificación rápida (SI/NO en es_pregunta_del_tema). Se deja en
 # Nova Micro a propósito: es la llamada de respaldo que más se repite y no
@@ -508,6 +518,28 @@ def _config_retrieve_and_generate(con_filtro_malla: bool) -> dict:
                         "Contexto de los documentos oficiales:\n$search_results$\n\n"
                         "Pregunta del usuario: $query$\n\n"
                         "Respuesta:"
+                    )
+                },
+            },
+            # Requerido por Bedrock cuando se usa un modelo (como Claude Sonnet 5)
+            # que todavía no tiene una plantilla de orquestación por defecto en el
+            # servicio de Knowledge Bases: sin esto, retrieve_and_generate falla con
+            # ValidationException ("Custom prompt templates must be provided for
+            # both Orchestration and Generation"). Esta etapa reformula la pregunta
+            # del usuario en una consulta de búsqueda independiente, usando el
+            # historial de la conversación si existe.
+            "orchestrationConfiguration": {
+                "promptTemplate": {
+                    "textPromptTemplate": (
+                        "Dada una conversación (si existe) y una pregunta de "
+                        "seguimiento, reformula la pregunta de seguimiento como una "
+                        "consulta de búsqueda independiente y clara, en el mismo "
+                        "idioma en que fue escrita. No respondas la pregunta, solo "
+                        "reformúlala para buscar en la base de conocimientos.\n\n"
+                        "Historial de la conversación:\n$conversation_history$\n\n"
+                        "Pregunta de seguimiento: $query$\n\n"
+                        "$output_format_instructions$\n\n"
+                        "Consulta de búsqueda independiente:"
                     )
                 },
             },
