@@ -22,11 +22,13 @@ Requerimientos implementados:
 4. Muestra la fuente principal de S3 usada (nombre + fragmento) y, si se
    consultó más de un archivo, un contador "(+N archivos más leídos)".
 5. Permite adjuntar una imagen (recibo, balance, ejercicio, captura de la
-   plataforma) junto al mensaje de texto. Como retrieve_and_generate no
-   acepta imágenes, en ese caso se usa Nova 2 Lite en modo visión vía
-   bedrock_runtime.converse(), reforzado con fragmentos de la Knowledge
-   Base como contexto de apoyo cuando también hay texto (ver
-   analizar_imagen y obtener_contexto_kb).
+   plataforma) o un archivo PDF (examen, guía, estado financiero, etc.)
+   junto al mensaje de texto. Como retrieve_and_generate no acepta
+   imágenes ni documentos, en ese caso se usa Nova 2 Lite en modo visión
+   vía bedrock_runtime.converse() (con un bloque "image" o "document"
+   según corresponda), reforzado con fragmentos de la Knowledge Base como
+   contexto de apoyo cuando también hay texto (ver analizar_imagen,
+   construir_bloque_adjunto y obtener_contexto_kb).
 """
 
 import base64
@@ -132,6 +134,25 @@ _EXT_A_FORMATO_BEDROCK = {
     "jpeg": "jpeg",
     "webp": "webp",
 }
+
+# =========================================================
+# Configuración para adjuntar archivos PDF (exámenes, estados
+# financieros, guías, etc.)
+# =========================================================
+# Igual que con las imágenes, retrieve_and_generate no acepta documentos, así
+# que un PDF adjunto también se procesa con bedrock_runtime.converse(), pero
+# usando un bloque "document" (Nova 2 Lite puede leer el PDF directamente,
+# sin necesidad de extraer el texto primero) en vez de un bloque "image".
+FORMATOS_PDF_PERMITIDOS = ["pdf"]
+
+# Límite conservador de tamaño por PDF (MB). Bedrock Converse admite
+# documentos de hasta ~4.5 MB enviados como bytes en el request, así que se
+# deja el mismo margen conservador que para las imágenes.
+MAX_PDF_MB = 4
+
+# Extensiones que se pueden adjuntar en el chat (imágenes + PDF), usadas en
+# el file_type de st.chat_input más abajo.
+FORMATOS_ADJUNTOS_PERMITIDOS = FORMATOS_IMAGEN_PERMITIDOS + FORMATOS_PDF_PERMITIDOS
 
 # =========================================================
 # 2. ESTILOS (tema rojo y blanco)
@@ -241,8 +262,15 @@ if "messages" not in st.session_state:
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        if message.get("imagen_b64"):
+        # Compatibilidad hacia atrás: mensajes antiguos guardados solo con
+        # "imagen_b64" (antes de agregar soporte de PDF).
+        if message.get("imagen_b64") and not message.get("archivo_b64"):
             st.image(base64.b64decode(message["imagen_b64"]))
+        elif message.get("archivo_b64"):
+            if message.get("archivo_tipo") == "pdf":
+                st.markdown(f"📄 `{message.get('archivo_nombre', 'documento.pdf')}`")
+            else:
+                st.image(base64.b64decode(message["archivo_b64"]))
         if message.get("content"):
             st.markdown(message["content"])
 
@@ -694,6 +722,51 @@ def formato_imagen_bedrock(nombre_archivo: str) -> str:
     return _EXT_A_FORMATO_BEDROCK.get(extension, "jpeg")
 
 
+def es_pdf(archivo) -> bool:
+    """Determina si el archivo adjuntado en el chat es un PDF, según su
+    extensión."""
+    return archivo.name.rsplit(".", 1)[-1].lower() == "pdf"
+
+
+def nombre_documento_bedrock(nombre_archivo: str) -> str:
+    """
+    Bedrock Converse exige que el campo 'name' de un bloque 'document' solo
+    contenga letras, números, espacios y los caracteres ()[]-, sin puntos ni
+    otros símbolos (por eso no se puede usar el nombre de archivo tal cual,
+    que trae la extensión ".pdf"). Se quita la extensión y se reemplaza
+    cualquier caracter no permitido por un espacio.
+    """
+    base = nombre_archivo.rsplit(".", 1)[0]
+    limpio = re.sub(r"[^a-zA-Z0-9 ()\[\]\-]", " ", base)
+    limpio = re.sub(r"\s+", " ", limpio).strip()
+    return limpio or "documento"
+
+
+def construir_bloque_adjunto(archivo) -> dict:
+    """
+    Arma el bloque de contenido de Bedrock Converse correspondiente al
+    archivo adjuntado en el chat: un bloque 'document' con format='pdf' si es
+    un PDF, o un bloque 'image' (como antes) si es una imagen. Nova 2 Lite
+    puede leer el PDF directamente (texto, tablas y su maquetación) sin
+    necesidad de extraer el texto manualmente antes de enviarlo.
+    """
+    archivo_bytes = archivo.getvalue()
+    if es_pdf(archivo):
+        return {
+            "document": {
+                "format": "pdf",
+                "name": nombre_documento_bedrock(archivo.name),
+                "source": {"bytes": archivo_bytes},
+            }
+        }
+    return {
+        "image": {
+            "format": formato_imagen_bedrock(archivo.name),
+            "source": {"bytes": archivo_bytes},
+        }
+    }
+
+
 def obtener_contexto_kb(pregunta: str, max_fragmentos: int = 4):
     """
     Hace un retrieve() (sin generación) sobre la Knowledge Base para usar sus
@@ -738,47 +811,55 @@ def obtener_contexto_kb(pregunta: str, max_fragmentos: int = 4):
 # consulta incluye una imagen (recibo, balance, ejercicio, captura de la
 # plataforma, etc.).
 PROMPT_PROFESOR_IMAGEN_EXTRA = (
-    "\n\nADEMÁS, en este caso el usuario adjuntó una IMAGEN (foto o captura de "
-    "un recibo, estado financiero, ejercicio de contabilidad, o de la "
-    "plataforma). Analiza la imagen con cuidado y responde sobre su contenido "
-    "aplicando tus conocimientos de contabilidad, finanzas y costos, igual que "
-    "harías con una pregunta de texto sobre el mismo tema. Si la imagen NO "
-    "tiene ninguna relación con contabilidad, finanzas, costos o la vida "
-    "académica de la universidad, responde EXACTA y ÚNICAMENTE con este "
-    f'mensaje, sin nada más: "{MENSAJE_RECHAZO}"'
+    "\n\nADEMÁS, en este caso el usuario adjuntó una IMAGEN o un ARCHIVO PDF "
+    "(foto o captura de un recibo, estado financiero, ejercicio de "
+    "contabilidad, de la plataforma; o un PDF con un examen, guía, estado "
+    "financiero, etc.). Analiza el contenido con cuidado y responde sobre él "
+    "aplicando tus conocimientos de contabilidad, finanzas y costos, igual "
+    "que harías con una pregunta de texto sobre el mismo tema. Si el "
+    "contenido adjunto NO tiene ninguna relación con contabilidad, finanzas, "
+    "costos o la vida académica de la universidad, responde EXACTA y "
+    f'ÚNICAMENTE con este mensaje, sin nada más: "{MENSAJE_RECHAZO}"'
 )
 
 
 def analizar_imagen(pregunta: str, archivo, contexto_kb: str = "") -> str:
     """
-    Analiza una imagen adjunta (con o sin pregunta de texto) usando Nova 2
-    Lite en modo multimodal, vía bedrock_runtime.converse(). Se usa converse
-    en vez de retrieve_and_generate porque este último no acepta imágenes.
+    Analiza un archivo adjunto (imagen o PDF, con o sin pregunta de texto)
+    usando Nova 2 Lite en modo multimodal, vía bedrock_runtime.converse(). Se
+    usa converse en vez de retrieve_and_generate porque este último no
+    acepta imágenes ni documentos.
 
     Si contexto_kb no está vacío (fragmentos recuperados con
     obtener_contexto_kb a partir de la pregunta de texto), se agrega como
-    apoyo adicional, sin ser la única fuente para analizar la imagen.
+    apoyo adicional, sin ser la única fuente para analizar el archivo.
     """
-    formato = formato_imagen_bedrock(archivo.name)
-    imagen_bytes = archivo.getvalue()
+    bloque_archivo = construir_bloque_adjunto(archivo)
+    es_documento_pdf = es_pdf(archivo)
 
     texto_usuario = (
         pregunta.strip()
         if pregunta and pregunta.strip()
         else (
-            "Analiza esta imagen (documento, recibo, estado financiero o "
+            "Analiza este documento (recibo, estado financiero o "
             "ejercicio) y explica lo que corresponda desde el punto de vista "
             "contable/financiero."
+            if es_documento_pdf
+            else (
+                "Analiza esta imagen (documento, recibo, estado financiero o "
+                "ejercicio) y explica lo que corresponda desde el punto de vista "
+                "contable/financiero."
+            )
         )
     )
     if contexto_kb:
         texto_usuario += (
             "\n\nContexto adicional de documentos oficiales (puede o no ser "
-            f"relevante para esta imagen):\n{contexto_kb}"
+            f"relevante para este archivo):\n{contexto_kb}"
         )
 
     contenido = [
-        {"image": {"format": formato, "source": {"bytes": imagen_bytes}}},
+        bloque_archivo,
         {"text": texto_usuario},
     ]
 
@@ -824,23 +905,26 @@ def diagnosticar_retrieve(pregunta: str):
 
 
 # =========================================================
-# 7. ENTRADA DE CHAT (texto y/o imagen adjunta)
+# 7. ENTRADA DE CHAT (texto y/o imagen/PDF adjunto)
 # =========================================================
 entrada = st.chat_input(
-    "Escribe tu consulta o adjunta una imagen (recibo, balance, ejercicio)...",
+    "Escribe tu consulta o adjunta una imagen/PDF (recibo, balance, ejercicio)...",
     accept_file=True,
-    file_type=FORMATOS_IMAGEN_PERMITIDOS,
+    file_type=FORMATOS_ADJUNTOS_PERMITIDOS,
 )
 
 if entrada:
     prompt = (entrada.text or "").strip()
     archivos_adjuntos = entrada["files"] or []
     archivo_imagen = archivos_adjuntos[0] if archivos_adjuntos else None
+    archivo_es_pdf = bool(archivo_imagen) and es_pdf(archivo_imagen)
+    limite_mb = MAX_PDF_MB if archivo_es_pdf else MAX_IMAGEN_MB
 
-    if archivo_imagen and archivo_imagen.size > MAX_IMAGEN_MB * 1024 * 1024:
+    if archivo_imagen and archivo_imagen.size > limite_mb * 1024 * 1024:
+        etiqueta_tipo = "El PDF pesa" if archivo_es_pdf else "La imagen pesa"
         st.error(
-            f"⚠️ La imagen pesa más de {MAX_IMAGEN_MB} MB. Sube una versión "
-            "más liviana (puedes comprimirla o recortar solo la parte "
+            f"⚠️ {etiqueta_tipo} más de {limite_mb} MB. Sube una versión "
+            "más liviana (puedes comprimirlo/a o recortar solo la parte "
             "relevante) e inténtalo de nuevo."
         )
     elif not prompt and not archivo_imagen:
@@ -848,19 +932,28 @@ if entrada:
         # seguridad no hacemos nada si ambos vienen vacíos.
         pass
     else:
-        # Guardamos la imagen como base64 en el historial para poder
-        # volver a mostrarla si la app se vuelve a renderizar.
-        imagen_b64_usuario = (
+        # Guardamos el archivo (imagen o PDF) como base64 en el historial
+        # para poder volver a mostrarlo si la app se vuelve a renderizar.
+        archivo_b64_usuario = (
             base64.b64encode(archivo_imagen.getvalue()).decode("utf-8")
             if archivo_imagen
             else None
         )
         st.session_state.messages.append(
-            {"role": "user", "content": prompt, "imagen_b64": imagen_b64_usuario}
+            {
+                "role": "user",
+                "content": prompt,
+                "archivo_b64": archivo_b64_usuario,
+                "archivo_tipo": "pdf" if archivo_es_pdf else "imagen",
+                "archivo_nombre": archivo_imagen.name if archivo_imagen else None,
+            }
         )
         with st.chat_message("user"):
             if archivo_imagen:
-                st.image(archivo_imagen)
+                if archivo_es_pdf:
+                    st.markdown(f"📄 `{archivo_imagen.name}`")
+                else:
+                    st.image(archivo_imagen)
             if prompt:
                 st.markdown(prompt)
 
@@ -870,11 +963,14 @@ if entrada:
             fuentes = []
 
             if archivo_imagen:
-                # ---- Flujo CON imagen: Nova 2 Lite en modo visión ----
-                # retrieve_and_generate no acepta imágenes, así que aquí no
-                # se usa consultar_knowledge_base(): se llama a
+                # ---- Flujo CON imagen o PDF: Nova 2 Lite en modo visión ----
+                # retrieve_and_generate no acepta imágenes ni documentos, así
+                # que aquí no se usa consultar_knowledge_base(): se llama a
                 # analizar_imagen(), que a su vez usa bedrock_runtime.converse().
-                with st.spinner("Analizando la imagen..."):
+                mensaje_spinner = (
+                    "Analizando el PDF..." if archivo_es_pdf else "Analizando la imagen..."
+                )
+                with st.spinner(mensaje_spinner):
                     try:
                         contexto_kb, fuentes = obtener_contexto_kb(prompt)
                         full_response = analizar_imagen(prompt, archivo_imagen, contexto_kb)
@@ -882,7 +978,8 @@ if entrada:
                         if MENSAJE_RECHAZO.strip() not in full_response and fuentes:
                             full_response += formatear_fuentes(fuentes)
                     except Exception as e:
-                        full_response = f"⚠️ Error al analizar la imagen: {e}"
+                        etiqueta_error = "el PDF" if archivo_es_pdf else "la imagen"
+                        full_response = f"⚠️ Error al analizar {etiqueta_error}: {e}"
             else:
                 # ---- Flujo normal, solo texto (Knowledge Base) ----
                 # Paso 1: clasificar tema
