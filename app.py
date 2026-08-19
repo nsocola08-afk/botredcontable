@@ -51,15 +51,15 @@ KB_ID = "2SESL9R1VO"
 # ya que es donde más se nota la calidad de redacción y el seguimiento
 # de instrucciones complejas.
 #
-# Nota: si Bedrock llegara a exigir un "inference profile" en vez del ARN
-# directo (error de "on-demand throughput not supported"), reemplaza la
-# línea de abajo por:
-#   account_id = boto3.client("sts").get_caller_identity()["Account"]
-#   MODEL_ARN_GENERACION = (
-#       f"arn:aws:bedrock:{AWS_REGION}:{account_id}:"
-#       "inference-profile/us.anthropic.claude-sonnet-5"
-#   )
-MODEL_ARN_GENERACION = "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-5"
+# Claude Sonnet 5 no admite invocación "on-demand" directa con el ARN de
+# foundation-model; Bedrock exige un "inference profile". Por eso se arma
+# el ARN con el ID de cuenta (obtenido vía STS) y el prefijo "us." del
+# inference profile de cross-region.
+_ACCOUNT_ID = boto3.client("sts", region_name=AWS_REGION).get_caller_identity()["Account"]
+MODEL_ARN_GENERACION = (
+    f"arn:aws:bedrock:{AWS_REGION}:{_ACCOUNT_ID}:"
+    "inference-profile/us.anthropic.claude-sonnet-5"
+)
 
 # Modelo de clasificación rápida (SI/NO en es_pregunta_del_tema). Se deja en
 # Nova Micro a propósito: es la llamada de respaldo que más se repite y no
