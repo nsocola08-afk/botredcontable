@@ -45,12 +45,39 @@ COLOR_FONDO = "#FFFFFF"
 AWS_REGION = "us-east-1"
 KB_ID = "2SESL9R1VO"
 
-# Modelo generador de respuestas (retrieve_and_generate). Nova Lite sigue
-# instrucciones complejas notablemente mejor que Nova Micro (más de 15
-# benchmarks a favor, incluyendo IFEval de instruction-following), con un
-# costo apenas ~1.7x mayor. Es el modelo que redacta la respuesta final
-# para el usuario, así que es donde más se nota la mejora de calidad.
-MODEL_ARN_GENERACION = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-lite-v1:0"
+# ID de la cuenta de AWS donde vive la Knowledge Base y donde está habilitado
+# el acceso a los modelos Nova en Bedrock. Se necesita porque Nova 2 Lite,
+# a diferencia de Nova Lite (v1), sólo se puede invocar en us-east-1 a través
+# de un "cross-region inference profile" (CRIS); llamar directamente al
+# foundation-model ID sin ese perfil devuelve un error de validación.
+AWS_ACCOUNT_ID = "882427185799"
+
+# Modelo generador de respuestas (retrieve_and_generate). Nova 2 Lite sigue
+# instrucciones complejas notablemente mejor que Nova Micro y que la propia
+# Nova Lite v1, con soporte de "extended thinking" (razonamiento ajustable)
+# y ventana de contexto de hasta 1M tokens, a un costo todavía bajo. Es el
+# modelo que redacta la respuesta final para el usuario, así que es donde
+# más se nota la mejora de calidad.
+#
+# IMPORTANTE: Nova 2 Lite requiere un cross-region inference profile (CRIS)
+# en us-east-1, así que el ARN NO es del tipo "foundation-model/..." plano
+# como con Nova Lite v1, sino "inference-profile/us.amazon.nova-2-lite-v1:0"
+# e incluye el Account ID. Si más adelante cambias de cuenta o de región,
+# actualiza AWS_ACCOUNT_ID y el prefijo "us." de abajo (usa "eu." o "global."
+# según corresponda).
+MODEL_ARN_GENERACION = (
+    f"arn:aws:bedrock:{AWS_REGION}:{AWS_ACCOUNT_ID}:inference-profile/"
+    "us.amazon.nova-2-lite-v1:0"
+)
+
+# Nivel de razonamiento ("extended thinking") de Nova 2 Lite para la
+# generación de respuestas: "low" | "medium" | "high", o None para
+# desactivarlo. Se deja en "low" porque mejora la precisión en preguntas
+# técnicas (NIC/NIIF) frente al razonamiento desactivado, sin el costo ni la
+# latencia extra de "medium"/"high". IMPORTANTE: si se sube a "high", Bedrock
+# no permite combinarlo con temperature/topP personalizados (hay que
+# quitarlos de _config_retrieve_and_generate).
+REASONING_EFFORT_GENERACION = "low"
 
 # Modelo de clasificación rápida (SI/NO en es_pregunta_del_tema). Se deja en
 # Nova Micro a propósito: es la llamada de respaldo que más se repite y no
@@ -494,24 +521,38 @@ def _config_retrieve_and_generate(con_filtro_malla: bool) -> dict:
             }
         }
 
+    generation_configuration = {
+        "inferenceConfig": {
+            "textInferenceConfig": {"maxTokens": 1000, "temperature": 0.0}
+        },
+        "promptTemplate": {
+            "textPromptTemplate": (
+                f"{PROMPT_PROFESOR}\n\n"
+                "Contexto de los documentos oficiales:\n$search_results$\n\n"
+                "Pregunta del usuario: $query$\n\n"
+                "Respuesta:"
+            )
+        },
+    }
+
+    if REASONING_EFFORT_GENERACION:
+        # Activa el "extended thinking" de Nova 2 Lite. Bedrock no permite
+        # combinar maxReasoningEffort="high" con temperature/topP fijos, así
+        # que si algún día se sube a "high" hay que quitar "temperature" de
+        # textInferenceConfig arriba.
+        generation_configuration["additionalModelRequestFields"] = {
+            "reasoningConfig": {
+                "type": "enabled",
+                "maxReasoningEffort": REASONING_EFFORT_GENERACION,
+            }
+        }
+
     return {
         "type": "KNOWLEDGE_BASE",
         "knowledgeBaseConfiguration": {
             "knowledgeBaseId": KB_ID,
             "modelArn": MODEL_ARN_GENERACION,
-            "generationConfiguration": {
-                "inferenceConfig": {
-                    "textInferenceConfig": {"maxTokens": 1000, "temperature": 0.0}
-                },
-                "promptTemplate": {
-                    "textPromptTemplate": (
-                        f"{PROMPT_PROFESOR}\n\n"
-                        "Contexto de los documentos oficiales:\n$search_results$\n\n"
-                        "Pregunta del usuario: $query$\n\n"
-                        "Respuesta:"
-                    )
-                },
-            },
+            "generationConfiguration": generation_configuration,
             "retrievalConfiguration": {
                 "vectorSearchConfiguration": vector_search_configuration
             },
