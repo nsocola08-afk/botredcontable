@@ -81,12 +81,60 @@ MODEL_ARN_GENERACION = (
 
 # Nivel de razonamiento ("extended thinking") de Nova 2 Lite para la
 # generación de respuestas: "low" | "medium" | "high", o None para
-# desactivarlo. Se deja en "low" porque mejora la precisión en preguntas
-# técnicas (NIC/NIIF) frente al razonamiento desactivado, sin el costo ni la
-# latencia extra de "medium"/"high". IMPORTANTE: si se sube a "high", Bedrock
-# no permite combinarlo con temperature/topP personalizados (hay que
-# quitarlos de _config_retrieve_and_generate).
-REASONING_EFFORT_GENERACION = "low"
+# desactivarlo. En vez de dejarlo fijo, se decide por pregunta con
+# nivel_razonamiento_para() (ver más abajo): "low" para preguntas simples
+# (definiciones, una sola parte) y "medium" para preguntas de varios pasos
+# (ejercicios con cálculos encadenados, registros contables completos) o
+# con archivo adjunto. NIVEL_RAZONAMIENTO_MAXIMO limita el techo que puede
+# devolver esa función (nunca sube solo a "high": eso rompería
+# temperature/topP fijos, ver nota en _config_retrieve_and_generate).
+NIVEL_RAZONAMIENTO_MAXIMO = "medium"
+
+# Palabras que delatan una pregunta de varios pasos: cálculos, registros
+# contables o ejercicios completos, donde "medium" mejora la precisión
+# frente a "low" (ver diferencias documentadas por AWS entre niveles).
+PALABRAS_CLAVE_COMPLEJIDAD = [
+    "calcula", "calcular", "resuelve", "resolver", "elabora", "elaborar",
+    "registra", "registrar", "asiento", "asientos", "ejercicio",
+    "determina", "determinar", "contabiliza", "contabilizar",
+    "estado financiero", "flujo de caja", "depreciación", "amortiza",
+    "amortización", "provisión", "ajuste", "conciliación", "balance",
+    "estado de resultados", "paso a paso",
+]
+
+
+def nivel_razonamiento_para(pregunta: str, con_archivo_adjunto: bool = False) -> str:
+    """
+    Decide "low" o "medium" de extended thinking según la complejidad
+    aparente de la pregunta, sin llamar a ningún modelo (heurística
+    gratuita, igual de rápida que no tener el chequeo).
+
+    Usa "medium" cuando:
+    - hay un archivo adjunto (imagen/PDF de un ejercicio, examen o estado
+      financiero: casi siempre requieren varios pasos), o
+    - el texto contiene alguna palabra de PALABRAS_CLAVE_COMPLEJIDAD
+      (cálculos, registros contables, ejercicios), o
+    - la pregunta es larga (más de 220 caracteres) o trae varias
+      sub-preguntas encadenadas (2+ signos de interrogación).
+
+    En cualquier otro caso ("qué es...", "cuál es la diferencia entre...",
+    preguntas cortas de una sola parte) usa "low", más rápido y barato.
+    """
+    if con_archivo_adjunto:
+        return NIVEL_RAZONAMIENTO_MAXIMO
+
+    texto = pregunta.lower()
+
+    if any(palabra in texto for palabra in PALABRAS_CLAVE_COMPLEJIDAD):
+        return NIVEL_RAZONAMIENTO_MAXIMO
+
+    if len(pregunta) > 220:
+        return NIVEL_RAZONAMIENTO_MAXIMO
+
+    if texto.count("?") >= 2:
+        return NIVEL_RAZONAMIENTO_MAXIMO
+
+    return "low"
 
 # Modelo de clasificación rápida (SI/NO en es_pregunta_del_tema). Se deja en
 # Nova Micro a propósito: es la llamada de respaldo que más se repite y no
@@ -567,7 +615,7 @@ def quitar_nota_de_fuente_propia(texto: str) -> str:
     return _PATRON_FUENTE_PROPIA.sub("", texto).rstrip()
 
 
-def _config_retrieve_and_generate(con_filtro_malla: bool) -> dict:
+def _config_retrieve_and_generate(con_filtro_malla: bool, nivel_razonamiento: str = None) -> dict:
     """
     Arma la configuración de retrieve_and_generate. Cuando con_filtro_malla es
     True, agrega un filtro de metadata para que la Knowledge Base busque
@@ -575,6 +623,10 @@ def _config_retrieve_and_generate(con_filtro_malla: bool) -> dict:
     (ARCHIVO_MALLA_CURRICULAR), usando el campo de metadata que Bedrock
     genera automáticamente para cada chunk con la ruta de S3 del archivo
     de origen ("x-amz-bedrock-kb-source-uri").
+
+    nivel_razonamiento ("low" | "medium" | "high" | None) se calcula por
+    pregunta con nivel_razonamiento_para(); None desactiva el "extended
+    thinking" para esta llamada.
     """
     vector_search_configuration = {"numberOfResults": 6}
     if con_filtro_malla:
@@ -587,7 +639,7 @@ def _config_retrieve_and_generate(con_filtro_malla: bool) -> dict:
 
     generation_configuration = {
         "inferenceConfig": {
-            "textInferenceConfig": {"maxTokens": 1000, "temperature": 0.0}
+            "textInferenceConfig": {"maxTokens": 4000, "temperature": 0.0}
         },
         "promptTemplate": {
             "textPromptTemplate": (
@@ -599,15 +651,15 @@ def _config_retrieve_and_generate(con_filtro_malla: bool) -> dict:
         },
     }
 
-    if REASONING_EFFORT_GENERACION:
+    if nivel_razonamiento:
         # Activa el "extended thinking" de Nova 2 Lite. Bedrock no permite
         # combinar maxReasoningEffort="high" con temperature/topP fijos, así
-        # que si algún día se sube a "high" hay que quitar "temperature" de
-        # textInferenceConfig arriba.
+        # que si algún día NIVEL_RAZONAMIENTO_MAXIMO sube a "high" hay que
+        # quitar "temperature" de textInferenceConfig arriba.
         generation_configuration["additionalModelRequestFields"] = {
             "reasoningConfig": {
                 "type": "enabled",
-                "maxReasoningEffort": REASONING_EFFORT_GENERACION,
+                "maxReasoningEffort": nivel_razonamiento,
             }
         }
 
@@ -644,12 +696,14 @@ def consultar_knowledge_base(pregunta: str, priorizar_malla: bool = False):
             "los cursos por código, nombre y semestre)"
         )
 
+    nivel_razonamiento = nivel_razonamiento_para(pregunta)
+
     if priorizar_malla:
         try:
             response = bedrock_agent.retrieve_and_generate(
                 input={"text": pregunta_para_kb},
                 retrieveAndGenerateConfiguration=_config_retrieve_and_generate(
-                    con_filtro_malla=True
+                    con_filtro_malla=True, nivel_razonamiento=nivel_razonamiento
                 ),
             )
         except Exception:
@@ -658,14 +712,14 @@ def consultar_knowledge_base(pregunta: str, priorizar_malla: bool = False):
             response = bedrock_agent.retrieve_and_generate(
                 input={"text": pregunta_para_kb},
                 retrieveAndGenerateConfiguration=_config_retrieve_and_generate(
-                    con_filtro_malla=False
+                    con_filtro_malla=False, nivel_razonamiento=nivel_razonamiento
                 ),
             )
     else:
         response = bedrock_agent.retrieve_and_generate(
             input={"text": pregunta_para_kb},
             retrieveAndGenerateConfiguration=_config_retrieve_and_generate(
-                con_filtro_malla=False
+                con_filtro_malla=False, nivel_razonamiento=nivel_razonamiento
             ),
         )
 
@@ -863,17 +917,19 @@ def analizar_imagen(pregunta: str, archivo, contexto_kb: str = "") -> str:
         {"text": texto_usuario},
     ]
 
+    nivel_razonamiento = nivel_razonamiento_para(pregunta, con_archivo_adjunto=True)
+
     parametros_converse = {
         "modelId": MODEL_ARN_GENERACION,
         "system": [{"text": PROMPT_PROFESOR + PROMPT_PROFESOR_IMAGEN_EXTRA}],
         "messages": [{"role": "user", "content": contenido}],
-        "inferenceConfig": {"maxTokens": 1000, "temperature": 0.0},
+        "inferenceConfig": {"maxTokens": 4000, "temperature": 0.0},
     }
-    if REASONING_EFFORT_GENERACION:
+    if nivel_razonamiento:
         parametros_converse["additionalModelRequestFields"] = {
             "reasoningConfig": {
                 "type": "enabled",
-                "maxReasoningEffort": REASONING_EFFORT_GENERACION,
+                "maxReasoningEffort": nivel_razonamiento,
             }
         }
 
