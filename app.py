@@ -73,7 +73,18 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.3.4"
+VERSION = "ALPHA 0.3.5"
+
+# MODO DEBUG TEMPORAL: cuando está en True, muestra abajo de cada respuesta
+# de cursos/malla curricular un cuadro con el resultado CRUDO (sin filtrar
+# por el prompt) de la búsqueda en la Knowledge Base — incluyendo el error
+# técnico exacto si la llamada a AWS falla (permisos, KB no encontrada, etc).
+# Esto es necesario porque el prompt le prohíbe al modelo mencionar errores
+# o detalles técnicos en su respuesta normal, así que sin esto no hay forma
+# de ver qué está pasando realmente del lado de AWS. PONLO EN False otra vez
+# una vez que quede resuelto el problema (no debe quedar visible para los
+# estudiantes en producción).
+MODO_DEBUG_KB = True
 
 MENSAJE_RECHAZO = (
     "Lo siento, solo puedo responder preguntas de contabilidad, finanzas, costos, o sobre los "
@@ -772,6 +783,8 @@ def generar_respuesta_final(pregunta: str) -> str:
 
     if es_pregunta_de_malla(pregunta):
         resultado_busqueda = buscar_en_malla_curricular(pregunta)
+        if MODO_DEBUG_KB:
+            st.session_state["debug_ultima_busqueda_kb"] = resultado_busqueda
         texto_usuario += (
             "\n\n[Resultado de la búsqueda en la malla curricular oficial de la "
             f"plataforma:]\n{resultado_busqueda}\n\n"
@@ -889,6 +902,8 @@ def analizar_imagen(pregunta: str, archivo) -> str:
     # Base de forma OBLIGATORIA (no se deja a discreción del modelo).
     if pregunta and es_pregunta_de_malla(pregunta):
         resultado_busqueda = buscar_en_malla_curricular(pregunta)
+        if MODO_DEBUG_KB:
+            st.session_state["debug_ultima_busqueda_kb"] = resultado_busqueda
         texto_usuario += (
             "\n\n[Resultado de la búsqueda en la malla curricular oficial de la "
             f"plataforma:]\n{resultado_busqueda}\n\n"
@@ -968,6 +983,10 @@ if entrada:
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
             full_response = ""
+            # Se reinicia en cada turno: solo debe mostrar el debug de ESTE
+            # turno, no el de una pregunta anterior que sí haya buscado en
+            # la malla curricular.
+            st.session_state["debug_ultima_busqueda_kb"] = None
 
             if archivo_imagen:
                 # ---- Flujo CON imagen o PDF: Nova Pro en modo visión ----
@@ -999,5 +1018,15 @@ if entrada:
 
             full_response = escapar_signos_dolar(full_response)
             message_placeholder.markdown(full_response)
+
+            # MODO DEBUG TEMPORAL (ver MODO_DEBUG_KB arriba): muestra el
+            # resultado crudo, sin filtrar, de la búsqueda en la Knowledge
+            # Base -- incluyendo el error técnico exacto si la llamada a
+            # AWS falló -- para diagnosticar por qué el bot no encuentra
+            # cursos/malla curricular que sí existen. Solo aparece cuando
+            # la pregunta de este turno disparó una búsqueda en la malla.
+            if MODO_DEBUG_KB and st.session_state.get("debug_ultima_busqueda_kb") is not None:
+                with st.expander("🔧 Debug temporal: resultado crudo de la Knowledge Base"):
+                    st.code(st.session_state["debug_ultima_busqueda_kb"])
 
         st.session_state.messages.append({"role": "assistant", "content": full_response})
