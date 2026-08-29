@@ -3,14 +3,16 @@ Asistente Contable - Universidad Redcontable
 =============================================
 Chatbot académico basado en Amazon Bedrock Knowledge Base (S3 + Pinecone).
 Usa dos modelos Nova según la tarea: Nova Micro para la clasificación rápida
-de tema (barato, tarea simple) y Nova Lite para generar la respuesta final
-(mejor siguiendo instrucciones, a un costo todavía muy bajo).
+de tema (barato, tarea simple) y Nova Pro para generar la respuesta final
+(el modelo más capaz de la familia Nova v1, con mejor precisión y
+seguimiento de instrucciones que Nova Lite/Nova 2 Lite, a cambio de un
+costo notablemente más alto).
 
 Requerimientos implementados:
 1. Interfaz Streamlit en rojo/blanco con título, subtítulo y botón de chat
    personalizados, y elementos por defecto de Streamlit ocultos.
 2. Conexión exclusiva a la Knowledge Base de Bedrock (S3 + Pinecone) usando
-   Amazon Nova Lite como modelo generador y Nova Micro como clasificador
+   Amazon Nova Pro como modelo generador y Nova Micro como clasificador
    de tema.
 3. El bot actúa como profesor especializado ÚNICAMENTE en contabilidad,
    finanzas, costos y la malla curricular de la institución:
@@ -23,12 +25,19 @@ Requerimientos implementados:
    consultó más de un archivo, un contador "(+N archivos más leídos)".
 5. Permite adjuntar una imagen (recibo, balance, ejercicio, captura de la
    plataforma) o un archivo PDF (examen, guía, estado financiero, etc.)
-   junto al mensaje de texto. Como retrieve_and_generate no acepta
-   imágenes ni documentos, en ese caso se usa Nova 2 Lite en modo visión
-   vía bedrock_runtime.converse() (con un bloque "image" o "document"
-   según corresponda), reforzado con fragmentos de la Knowledge Base como
-   contexto de apoyo cuando también hay texto (ver analizar_imagen,
-   construir_bloque_adjunto y obtener_contexto_kb).
+   junto al mensaje de texto. La generación de la respuesta SIEMPRE pasa
+   por Nova Pro en modo multimodal vía bedrock_runtime.converse() (con
+   un bloque "image" o "document" según corresponda cuando hay adjunto),
+   reforzada con fragmentos de la Knowledge Base como contexto de apoyo
+   (ver analizar_imagen, generar_respuesta_final, construir_bloque_adjunto
+   y obtener_contexto_kb).
+6. Tiene memoria de la CONVERSACIÓN dentro de la sesión actual: cada
+   pregunta se envía junto con el historial de turnos anteriores de esa
+   misma sesión de Streamlit (ver construir_historial_bedrock), así que el
+   bot entiende repreguntas como "¿y con el otro método?" sin que el
+   usuario tenga que repetir el contexto. Ese historial vive solo en
+   memoria (st.session_state): si el usuario cierra o recarga la pestaña,
+   se pierde por completo y no se guarda en ningún otro lugar.
 """
 
 import base64
@@ -54,40 +63,37 @@ COLOR_FONDO = "#FFFFFF"
 AWS_REGION = "us-east-1"
 KB_ID = "2SESL9R1VO"
 
-# ID de la cuenta de AWS donde vive la Knowledge Base y donde está habilitado
-# el acceso a los modelos Nova en Bedrock. Se necesita porque Nova 2 Lite,
-# a diferencia de Nova Lite (v1), sólo se puede invocar en us-east-1 a través
-# de un "cross-region inference profile" (CRIS); llamar directamente al
-# foundation-model ID sin ese perfil devuelve un error de validación.
+# ID de la cuenta de AWS donde vive la Knowledge Base. Actualmente NO se usa
+# para armar el ARN del modelo generador: Nova Pro v1 se invoca directo por
+# su foundation-model ID en us-east-1, sin necesitar un "cross-region
+# inference profile" (CRIS) ni incluir el Account ID en el ARN. Se deja
+# declarada por si más adelante se vuelve a usar un modelo que sí lo
+# requiera (por ejemplo Nova 2 Lite o Nova 2 Pro, que si lo necesitan).
 AWS_ACCOUNT_ID = "882427185799"
 
-# Modelo generador de respuestas (retrieve_and_generate). Nova 2 Lite sigue
-# instrucciones complejas notablemente mejor que Nova Micro y que la propia
-# Nova Lite v1, con soporte de "extended thinking" (razonamiento ajustable)
-# y ventana de contexto de hasta 1M tokens, a un costo todavía bajo. Es el
-# modelo que redacta la respuesta final para el usuario, así que es donde
-# más se nota la mejora de calidad.
+# Modelo generador de respuestas (usado vía bedrock_runtime.converse(), ver
+# generar_respuesta_final y analizar_imagen). Nova Pro es el modelo más
+# capaz de la familia Nova v1: mejor precisión y seguimiento de
+# instrucciones que Nova Lite/Nova Micro, con ventana de contexto de 300K
+# tokens. A cambio, es notablemente más caro que Nova 2 Lite (según la
+# página de precios de Bedrock, revísala antes de un uso masivo) — conviene
+# vigilar el consumo si el volumen de preguntas es alto.
 #
-# IMPORTANTE: Nova 2 Lite requiere un cross-region inference profile (CRIS)
-# en us-east-1, así que el ARN NO es del tipo "foundation-model/..." plano
-# como con Nova Lite v1, sino "inference-profile/us.amazon.nova-2-lite-v1:0"
-# e incluye el Account ID. Si más adelante cambias de cuenta o de región,
-# actualiza AWS_ACCOUNT_ID y el prefijo "us." de abajo (usa "eu." o "global."
-# según corresponda).
-MODEL_ARN_GENERACION = (
-    f"arn:aws:bedrock:{AWS_REGION}:{AWS_ACCOUNT_ID}:inference-profile/"
-    "us.amazon.nova-2-lite-v1:0"
-)
+# A diferencia de Nova 2 Lite, Nova Pro v1 SÍ está disponible en us-east-1
+# como foundation-model "normal" (sin cross-region inference profile), así
+# que el ARN es del tipo "foundation-model/..." plano, igual que
+# MODEL_ARN_CLASIFICACION más abajo.
+MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.nova-pro-v1:0"
 
-# Nivel de razonamiento ("extended thinking") de Nova 2 Lite para la
-# generación de respuestas: "low" | "medium" | "high", o None para
-# desactivarlo. En vez de dejarlo fijo, se decide por pregunta con
-# nivel_razonamiento_para() (ver más abajo): "low" para preguntas simples
-# (definiciones, una sola parte) y "medium" para preguntas de varios pasos
-# (ejercicios con cálculos encadenados, registros contables completos) o
-# con archivo adjunto. NIVEL_RAZONAMIENTO_MAXIMO limita el techo que puede
-# devolver esa función (nunca sube solo a "high": eso rompería
-# temperature/topP fijos, ver nota en _config_retrieve_and_generate).
+# IMPORTANTE: Nova Pro v1 NO soporta "extended thinking" (razonamiento
+# ajustable), a diferencia de Nova 2 Lite/Nova 2 Pro. Por eso
+# generar_respuesta_final() y analizar_imagen() YA NO envían
+# additionalModelRequestFields con reasoningConfig: hacerlo con este modelo
+# devuelve un error de validación de Bedrock. NIVEL_RAZONAMIENTO_MAXIMO y
+# nivel_razonamiento_para() (más abajo) se dejan definidos sin usarse — no
+# hacen ninguna llamada a AWS, son solo una heurística en Python — por si
+# en el futuro se vuelve a usar un modelo Nova 2 que sí soporte esta
+# función.
 NIVEL_RAZONAMIENTO_MAXIMO = "medium"
 
 # Palabras que delatan una pregunta de varios pasos: cálculos, registros
@@ -144,7 +150,7 @@ MODEL_ARN_CLASIFICACION = "arn:aws:bedrock:us-east-1::foundation-model/amazon.no
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.0.30"
+VERSION = "ALPHA 0.0.32"
 
 # Documento oficial de la malla curricular / plan de estudios. Cuando el
 # usuario pregunta por cursos, asignaturas, semestres o "la malla", se
@@ -276,8 +282,9 @@ with st.sidebar:
 # =========================================================
 # 3. CLIENTES DE AWS BEDROCK
 # =========================================================
-# - bedrock-agent-runtime: para consultar la Knowledge Base (retrieve_and_generate)
-# - bedrock-runtime: para una clasificación rápida de tema (sin KB, más barata)
+# - bedrock-agent-runtime: para consultar la Knowledge Base (retrieve(), sin generación)
+# - bedrock-runtime: para generar la respuesta final (converse()) y para la
+#   clasificación rápida de tema (sin KB, más barata)
 @st.cache_resource(show_spinner=False)
 def obtener_clientes_bedrock():
     session = boto3.Session(region_name=AWS_REGION)
@@ -644,79 +651,82 @@ def quitar_nota_de_fuente_propia(texto: str) -> str:
     return _PATRON_FUENTE_PROPIA.sub("", texto).rstrip()
 
 
-def _config_retrieve_and_generate(con_filtro_malla: bool, nivel_razonamiento: str = None) -> dict:
+# Cuántos intercambios anteriores (pregunta del usuario + respuesta del bot)
+# se le pasan al modelo como "memoria" de la conversación en cada llamada.
+# Ese historial vive ÚNICAMENTE en st.session_state (ver
+# construir_historial_bedrock): si el usuario cierra o recarga la pestaña,
+# st.session_state se reinicia y el historial desaparece por completo. Nunca
+# se guarda en disco, en la Knowledge Base ni en ningún otro lugar
+# persistente.
+MAX_TURNOS_HISTORIAL = 6
+
+
+def construir_historial_bedrock(max_turnos: int = MAX_TURNOS_HISTORIAL) -> list:
     """
-    Arma la configuración de retrieve_and_generate. Cuando con_filtro_malla es
-    True, agrega un filtro de metadata para que la Knowledge Base busque
-    prioritariamente dentro del documento de la malla curricular
-    (ARCHIVO_MALLA_CURRICULAR), usando el campo de metadata que Bedrock
-    genera automáticamente para cada chunk con la ruta de S3 del archivo
-    de origen ("x-amz-bedrock-kb-source-uri").
+    Convierte el historial de la sesión actual (st.session_state.messages) al
+    formato de "messages" que espera Bedrock Converse, para darle al modelo
+    memoria de las preguntas y respuestas anteriores DENTRO de esta misma
+    sesión de Streamlit.
 
-    nivel_razonamiento ("low" | "medium" | "high" | None) se calcula por
-    pregunta con nivel_razonamiento_para(); None desactiva el "extended
-    thinking" para esta llamada.
+    Se excluye el último elemento de st.session_state.messages porque
+    corresponde a la pregunta actual, que cada función de generación arma
+    por separado (con su propio contexto de la Knowledge Base o su archivo
+    adjunto). Si un turno anterior tuvo un archivo adjunto, no se reenvían
+    sus bytes (sería pesado y costoso repetirlo en cada turno siguiente):
+    en su lugar se deja una nota de texto indicando que hubo un adjunto.
+
+    Bedrock Converse exige que la conversación empiece en "user" y que los
+    roles alternen estrictamente entre "user" y "assistant"; los mensajes
+    que romperían esa alternancia (por ejemplo el saludo inicial del bot,
+    que es "assistant" sin ningún "user" antes) se descartan en vez de dejar
+    fallar la llamada.
     """
-    vector_search_configuration = {"numberOfResults": 6}
-    if con_filtro_malla:
-        vector_search_configuration["filter"] = {
-            "stringContains": {
-                "key": "x-amz-bedrock-kb-source-uri",
-                "value": "MALLA_CURRICULAR",
-            }
-        }
+    historial_crudo = st.session_state.get("messages", [])[:-1]
+    mensajes = []
+    for m in historial_crudo:
+        rol = m.get("role")
+        if rol not in ("user", "assistant"):
+            continue
+        texto = (m.get("content") or "").strip()
+        if rol == "user" and m.get("archivo_nombre"):
+            nota = f"[El usuario adjuntó un archivo: {m['archivo_nombre']}]"
+            texto = f"{nota}\n{texto}" if texto else nota
+        if not texto:
+            continue
+        if not mensajes and rol != "user":
+            continue
+        if mensajes and mensajes[-1]["role"] == rol:
+            continue
+        mensajes.append({"role": rol, "content": [{"text": texto}]})
 
-    generation_configuration = {
-        "inferenceConfig": {
-            "textInferenceConfig": {"maxTokens": 4000, "temperature": 0.0}
-        },
-        "promptTemplate": {
-            "textPromptTemplate": (
-                f"{PROMPT_PROFESOR}\n\n"
-                "Contexto de los documentos oficiales:\n$search_results$\n\n"
-                "Pregunta del usuario: $query$\n\n"
-                "Respuesta:"
-            )
-        },
-    }
-
-    if nivel_razonamiento:
-        # Activa el "extended thinking" de Nova 2 Lite. Bedrock no permite
-        # combinar maxReasoningEffort="high" con temperature/topP fijos, así
-        # que si algún día NIVEL_RAZONAMIENTO_MAXIMO sube a "high" hay que
-        # quitar "temperature" de textInferenceConfig arriba.
-        generation_configuration["additionalModelRequestFields"] = {
-            "reasoningConfig": {
-                "type": "enabled",
-                "maxReasoningEffort": nivel_razonamiento,
-            }
-        }
-
-    return {
-        "type": "KNOWLEDGE_BASE",
-        "knowledgeBaseConfiguration": {
-            "knowledgeBaseId": KB_ID,
-            "modelArn": MODEL_ARN_GENERACION,
-            "generationConfiguration": generation_configuration,
-            "retrievalConfiguration": {
-                "vectorSearchConfiguration": vector_search_configuration
-            },
-        },
-    }
+    mensajes = mensajes[-(max_turnos * 2):]
+    if mensajes and mensajes[0]["role"] != "user":
+        mensajes = mensajes[1:]
+    return mensajes
 
 
-def consultar_knowledge_base(pregunta: str, priorizar_malla: bool = False):
+def obtener_contexto_kb(pregunta: str, priorizar_malla: bool = False, max_fragmentos: int = 4):
     """
-    Llama a retrieve_and_generate y devuelve (texto_respuesta, lista_de_fuentes).
+    Hace un retrieve() (SIN generación) sobre la Knowledge Base y devuelve
+    (texto_contexto, lista_de_fuentes). La respuesta final SIEMPRE se genera
+    aparte con bedrock_runtime.converse() (ver generar_respuesta_final y
+    analizar_imagen), tanto para preguntas de solo texto como para imágenes o
+    PDF adjuntos: así el mismo mecanismo de memoria de conversación
+    (construir_historial_bedrock) funciona igual en ambos casos, algo que
+    retrieve_and_generate no permitía controlar manualmente.
 
     Si priorizar_malla es True (la pregunta trata sobre cursos, asignaturas,
     semestres, "la malla" o "la plataforma/página"), se refuerza la consulta
     semántica y se intenta primero con un filtro de metadata que apunta
     directamente al documento de la malla curricular. Si ese filtro falla
     (por ejemplo, porque el almacén vectorial configurado no soporta
-    filtrado por metadata), se reintenta sin filtro, apoyándose solo en la
-    consulta reforzada.
+    filtrado por metadata), se reintenta sin filtro.
+
+    Si falla o no hay resultados, devuelve ("", []) sin romper el flujo.
     """
+    if not pregunta:
+        return "", []
+
     pregunta_para_kb = pregunta
     if priorizar_malla:
         pregunta_para_kb = (
@@ -725,56 +735,101 @@ def consultar_knowledge_base(pregunta: str, priorizar_malla: bool = False):
             "los cursos por código, nombre y semestre)"
         )
 
-    nivel_razonamiento = nivel_razonamiento_para(pregunta)
-
-    if priorizar_malla:
-        try:
-            response = bedrock_agent.retrieve_and_generate(
-                input={"text": pregunta_para_kb},
-                retrieveAndGenerateConfiguration=_config_retrieve_and_generate(
-                    con_filtro_malla=True, nivel_razonamiento=nivel_razonamiento
-                ),
-            )
-        except Exception:
-            # El filtro de metadata no está soportado por esta Knowledge Base
-            # (o el campo no existe en el índice); reintentamos sin filtro.
-            response = bedrock_agent.retrieve_and_generate(
-                input={"text": pregunta_para_kb},
-                retrieveAndGenerateConfiguration=_config_retrieve_and_generate(
-                    con_filtro_malla=False, nivel_razonamiento=nivel_razonamiento
-                ),
-            )
-    else:
-        response = bedrock_agent.retrieve_and_generate(
-            input={"text": pregunta_para_kb},
-            retrieveAndGenerateConfiguration=_config_retrieve_and_generate(
-                con_filtro_malla=False, nivel_razonamiento=nivel_razonamiento
-            ),
+    def _retrieve(con_filtro_malla: bool):
+        config = {"numberOfResults": max_fragmentos}
+        if con_filtro_malla:
+            config["filter"] = {
+                "stringContains": {
+                    "key": "x-amz-bedrock-kb-source-uri",
+                    "value": "MALLA_CURRICULAR",
+                }
+            }
+        return bedrock_agent.retrieve(
+            knowledgeBaseId=KB_ID,
+            retrievalQuery={"text": pregunta_para_kb},
+            retrievalConfiguration={"vectorSearchConfiguration": config},
         )
 
-    texto_respuesta = response.get("output", {}).get("text", "").strip()
-    texto_respuesta = limpiar_marcadores_citas(texto_respuesta)
-    texto_respuesta = quitar_nota_de_fuente_propia(texto_respuesta)
+    try:
+        if priorizar_malla:
+            try:
+                resp = _retrieve(con_filtro_malla=True)
+            except Exception:
+                # El filtro de metadata no está soportado por esta Knowledge
+                # Base (o el campo no existe en el índice); reintentamos sin
+                # filtro.
+                resp = _retrieve(con_filtro_malla=False)
+        else:
+            resp = _retrieve(con_filtro_malla=False)
+    except Exception:
+        return "", []
 
-    # Recolectar fuentes de S3 sin duplicados, en orden de relevancia
+    fragmentos = []
     fuentes = []
-    for citation in response.get("citations", []):
-        for reference in citation.get("retrievedReferences", []):
-            s3_uri = reference.get("location", {}).get("s3Location", {}).get("uri", "")
-            if not s3_uri:
-                continue
+    for r in resp.get("retrievalResults", []):
+        texto = r.get("content", {}).get("text", "")
+        if not texto:
+            continue
+        fragmentos.append(texto)
+
+        s3_uri = r.get("location", {}).get("s3Location", {}).get("uri", "")
+        if s3_uri:
             nombre_archivo = urllib.parse.unquote(s3_uri.split("/")[-1])
             if nombre_archivo not in [f["nombre"] for f in fuentes]:
-                fragmento = reference.get("content", {}).get("text", "")
-                fuentes.append(
-                    {
-                        "nombre": nombre_archivo,
-                        "fragmento": fragmento[:150].strip()
-                        if fragmento
-                        else "Fragmento oficial de la base de conocimientos",
-                    }
-                )
+                fuentes.append({"nombre": nombre_archivo, "fragmento": texto[:150].strip()})
 
+    return "\n\n".join(fragmentos), fuentes
+
+
+def generar_respuesta_final(pregunta: str, contexto_kb: str) -> str:
+    """
+    Genera la respuesta final del profesor con bedrock_runtime.converse(),
+    agregando el HISTORIAL de la conversación de la sesión actual (ver
+    construir_historial_bedrock) para que el bot recuerde preguntas y
+    respuestas anteriores dentro de la misma sesión de Streamlit.
+
+    NOTA: MODEL_ARN_GENERACION apunta a Nova Pro v1, que no soporta
+    "extended thinking" (a diferencia de Nova 2 Lite/Nova 2 Pro), así que
+    aquí NO se envía additionalModelRequestFields con reasoningConfig (ver
+    la nota completa junto a MODEL_ARN_GENERACION más arriba).
+    """
+    texto_usuario = pregunta.strip()
+    if contexto_kb:
+        texto_usuario += (
+            "\n\nContexto de los documentos oficiales (puede o no ser "
+            f"relevante):\n{contexto_kb}"
+        )
+
+    mensajes = construir_historial_bedrock() + [
+        {"role": "user", "content": [{"text": texto_usuario}]}
+    ]
+
+    parametros_converse = {
+        "modelId": MODEL_ARN_GENERACION,
+        "system": [{"text": PROMPT_PROFESOR}],
+        "messages": mensajes,
+        "inferenceConfig": {"maxTokens": 4000, "temperature": 0.0},
+    }
+
+    response = bedrock_runtime.converse(**parametros_converse)
+    bloques = response.get("output", {}).get("message", {}).get("content", [])
+    texto_respuesta = "".join(b.get("text", "") for b in bloques).strip()
+    texto_respuesta = limpiar_marcadores_citas(texto_respuesta)
+    texto_respuesta = quitar_nota_de_fuente_propia(texto_respuesta)
+    return texto_respuesta
+
+
+def consultar_knowledge_base(pregunta: str, priorizar_malla: bool = False):
+    """
+    Punto de entrada del flujo normal de solo texto: recupera contexto de la
+    Knowledge Base (obtener_contexto_kb) y genera la respuesta final ya con
+    memoria de la conversación (generar_respuesta_final). Devuelve
+    (texto_respuesta, lista_de_fuentes).
+    """
+    contexto_kb, fuentes = obtener_contexto_kb(
+        pregunta, priorizar_malla=priorizar_malla, max_fragmentos=6
+    )
+    texto_respuesta = generar_respuesta_final(pregunta, contexto_kb)
     return texto_respuesta, fuentes
 
 
@@ -850,46 +905,6 @@ def construir_bloque_adjunto(archivo) -> dict:
     }
 
 
-def obtener_contexto_kb(pregunta: str, max_fragmentos: int = 4):
-    """
-    Hace un retrieve() (sin generación) sobre la Knowledge Base para usar sus
-    fragmentos como contexto de APOYO cuando la imagen viene acompañada de
-    una pregunta de texto. Devuelve (texto_contexto, lista_de_fuentes).
-
-    Si falla o no hay resultados, devuelve ("", []) sin romper el flujo: la
-    imagen se sigue pudiendo analizar solo con el modelo de visión.
-    """
-    if not pregunta:
-        return "", []
-
-    try:
-        resp = bedrock_agent.retrieve(
-            knowledgeBaseId=KB_ID,
-            retrievalQuery={"text": pregunta},
-            retrievalConfiguration={
-                "vectorSearchConfiguration": {"numberOfResults": max_fragmentos}
-            },
-        )
-    except Exception:
-        return "", []
-
-    fragmentos = []
-    fuentes = []
-    for r in resp.get("retrievalResults", []):
-        texto = r.get("content", {}).get("text", "")
-        if not texto:
-            continue
-        fragmentos.append(texto)
-
-        s3_uri = r.get("location", {}).get("s3Location", {}).get("uri", "")
-        if s3_uri:
-            nombre_archivo = urllib.parse.unquote(s3_uri.split("/")[-1])
-            if nombre_archivo not in [f["nombre"] for f in fuentes]:
-                fuentes.append({"nombre": nombre_archivo, "fragmento": texto[:150].strip()})
-
-    return "\n\n".join(fragmentos), fuentes
-
-
 # Instrucción adicional que se agrega a PROMPT_PROFESOR únicamente cuando la
 # consulta incluye una imagen (recibo, balance, ejercicio, captura de la
 # plataforma, etc.).
@@ -912,6 +927,11 @@ def analizar_imagen(pregunta: str, archivo, contexto_kb: str = "") -> str:
     usando Nova 2 Lite en modo multimodal, vía bedrock_runtime.converse(). Se
     usa converse en vez de retrieve_and_generate porque este último no
     acepta imágenes ni documentos.
+
+    También incluye el historial de la conversación de la sesión actual (ver
+    construir_historial_bedrock), para que si el usuario adjunta un archivo
+    como repregunta de algo que ya preguntó antes en texto (o viceversa), el
+    modelo tenga ese contexto.
 
     Si contexto_kb no está vacío (fragmentos recuperados con
     obtener_contexto_kb a partir de la pregunta de texto), se agrega como
@@ -946,21 +966,20 @@ def analizar_imagen(pregunta: str, archivo, contexto_kb: str = "") -> str:
         {"text": texto_usuario},
     ]
 
-    nivel_razonamiento = nivel_razonamiento_para(pregunta, con_archivo_adjunto=True)
+    # El adjunto (imagen/PDF) siempre va en el ÚLTIMO turno; el historial de
+    # la sesión (construir_historial_bedrock) solo aporta memoria de TEXTO de
+    # preguntas y respuestas anteriores, sin reenviar adjuntos previos.
+    mensajes = construir_historial_bedrock() + [{"role": "user", "content": contenido}]
 
+    # NOTA: MODEL_ARN_GENERACION apunta a Nova Pro v1, que no soporta
+    # "extended thinking", así que no se envía additionalModelRequestFields
+    # (ver la nota completa junto a MODEL_ARN_GENERACION más arriba).
     parametros_converse = {
         "modelId": MODEL_ARN_GENERACION,
         "system": [{"text": PROMPT_PROFESOR + PROMPT_PROFESOR_IMAGEN_EXTRA}],
-        "messages": [{"role": "user", "content": contenido}],
+        "messages": mensajes,
         "inferenceConfig": {"maxTokens": 4000, "temperature": 0.0},
     }
-    if nivel_razonamiento:
-        parametros_converse["additionalModelRequestFields"] = {
-            "reasoningConfig": {
-                "type": "enabled",
-                "maxReasoningEffort": nivel_razonamiento,
-            }
-        }
 
     response = bedrock_runtime.converse(**parametros_converse)
     bloques = response.get("output", {}).get("message", {}).get("content", [])
