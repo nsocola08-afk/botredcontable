@@ -1,11 +1,10 @@
 """
 Asistente Contable - Universidad Redcontable
 =============================================
-Chatbot académico impulsado por Amazon Nova Pro, guiado por el prompt de
-"profesor" (PROMPT_PROFESOR) definido en este archivo. Usa dos modelos Nova
-según la tarea: Nova Micro para la clasificación rápida de tema (barato,
-tarea simple) y Nova Pro para generar la respuesta final (el modelo más
-capaz de la familia Nova v1).
+Chatbot académico impulsado ÚNICAMENTE por Amazon Nova Pro v1 (un solo
+modelo para todo: la clasificación rápida de tema y la respuesta final),
+guiado por el prompt de "profesor" (PROMPT_PROFESOR) definido en este
+archivo.
 
 Requerimientos implementados:
 1. Interfaz Streamlit en rojo/blanco con título, subtítulo y botón de chat
@@ -66,25 +65,19 @@ AWS_REGION = "us-east-1"
 # actualízalo aquí.
 KB_ID = "2SESL9R1VO"
 
-# Modelo generador de respuestas (usado vía bedrock_runtime.converse(), ver
-# generar_respuesta_final y analizar_imagen). Nova Pro v1 está disponible en
+# Único modelo usado en todo el archivo (respuesta final Y clasificación
+# rápida de tema, ver es_pregunta_del_tema). Nova Pro v1 está disponible en
 # us-east-1 como foundation-model "normal" (sin cross-region inference
-# profile), así que el ARN es del tipo "foundation-model/..." plano, igual
-# que MODEL_ARN_CLASIFICACION.
+# profile), así que el ARN es del tipo "foundation-model/..." plano.
 MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.nova-pro-v1:0"
-
-# Modelo de clasificación rápida (SI/NO en es_pregunta_del_tema). Se deja en
-# Nova Micro a propósito: es la llamada de respaldo que más se repite y no
-# necesita más potencia para una tarea tan simple, así se mantiene el costo
-# lo más bajo posible.
-MODEL_ARN_CLASIFICACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.nova-micro-v1:0"
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.2.1"
+VERSION = "ALPHA 0.3.0"
 
 MENSAJE_RECHAZO = (
-    "Lo siento, solo puedo responder preguntas de contabilidad, finanzas y costos."
+    "Lo siento, solo puedo responder preguntas de contabilidad, finanzas, costos, o sobre los "
+    "cursos y la malla curricular de la plataforma de la Universidad Redcontable."
 )
 
 # =========================================================
@@ -185,8 +178,9 @@ st.markdown("<p class='subtitulo' style='text-align:center;'>Profesor y asistent
 # =========================================================
 # 3. CLIENTES DE AWS BEDROCK
 # =========================================================
-# - bedrock-runtime: para generar la respuesta final (converse() con Nova
-#   Pro) y para la clasificación rápida de tema (converse() con Nova Micro).
+# - bedrock-runtime: para generar la respuesta final Y para la clasificación
+#   rápida de tema (converse() con Nova Pro en ambos casos, ver
+#   MODEL_ARN_GENERACION).
 # - bedrock-agent-runtime: SOLO para la herramienta buscar_en_kb() (ver más
 #   abajo), que el modelo invoca bajo demanda vía tool use, no en cada
 #   pregunta.
@@ -240,13 +234,14 @@ for message in st.session_state.messages:
 # decida "¿respondo o rechazo?" al mismo tiempo que genera la respuesta.
 #
 # Es un filtro en DOS capas:
-#   a) Palabras clave contables/financieras conocidas -> detección instantánea
-#      y 100% confiable, sin depender del conocimiento del modelo. Esto es
-#      clave para siglas técnicas (NIC, NIIF, IFRS...) que un modelo tan
-#      pequeño como Nova Micro puede no reconocer de forma fiable.
+#   a) Palabras clave contables/financieras/de la plataforma conocidas ->
+#      detección instantánea y 100% confiable, sin llamar a ningún modelo.
+#      Esto es clave para siglas técnicas (NIC, NIIF, IFRS...) y evita una
+#      llamada a Bedrock en la mayoría de los casos.
 #   b) Si no hay coincidencia de palabras clave, se usa una llamada corta a
-#      Nova Micro como respaldo, para preguntas redactadas de otra forma
-#      (ej. "cómo se calcula el costo de un producto terminado").
+#      Nova Pro (el mismo modelo de MODEL_ARN_GENERACION, no hay un segundo
+#      modelo más barato) como respaldo, para preguntas redactadas de otra
+#      forma (ej. "cómo se calcula el costo de un producto terminado").
 PALABRAS_CLAVE_TEMA = [
     "contabil", "contador", "financ", "costo", "costeo", "presupuest",
     "auditor", "tributari", "impuesto", "fiscal",
@@ -262,6 +257,14 @@ PALABRAS_CLAVE_TEMA = [
     "ratio financ", "razon financ", "razón financ", "apalanca",
     "cxc", "cxp", "roe", "roi", "ebitda", "van", "tir",
     "declaraci\u00f3n de renta", "declaracion de renta", "sunat", "sat ",
+    # Cursos / malla curricular / plataforma: preguntas sobre la Universidad
+    # Redcontable como instituci\u00f3n (no son de contabilidad en s\u00ed, pero el
+    # bot tambi\u00e9n responde esto porque vive dentro de esa plataforma de
+    # cursos, ver PROMPT_PROFESOR y la herramienta buscar_en_archivos).
+    "malla curricular", "malla", "curso", "cursos", "asignatura", "materia",
+    "materias", "plan de estudio", "pensum", "semestre", "plataforma",
+    "pagina", "p\u00e1gina", "sitio web", "redcontable", "universidad redcontable",
+    "docente", "profesor", "syllabus", "silabo", "s\u00edlabo",
 ]
 
 
@@ -275,10 +278,11 @@ def es_pregunta_del_tema(pregunta: str) -> bool:
     if contiene_palabra_clave(pregunta):
         return True
 
-    # Capa 2: respaldo con Nova Micro para frases sin esas palabras exactas
+    # Capa 2: respaldo con Nova Pro (mismo modelo de MODEL_ARN_GENERACION)
+    # para frases sin esas palabras exactas
     try:
         resp = bedrock_runtime.converse(
-            modelId=MODEL_ARN_CLASIFICACION,
+            modelId=MODEL_ARN_GENERACION,
             messages=[
                 {
                     "role": "user",
@@ -287,8 +291,9 @@ def es_pregunta_del_tema(pregunta: str) -> bool:
                             "text": (
                                 "Responde ÚNICAMENTE con la palabra SI o NO, sin explicaciones "
                                 "ni puntuación adicional. ¿La siguiente pregunta trata sobre "
-                                "contabilidad, finanzas, costos o normas contables (como NIC o "
-                                "NIIF)?\n\n"
+                                "contabilidad, finanzas, costos, normas contables (como NIC o "
+                                "NIIF), o sobre los cursos, la malla curricular o la plataforma "
+                                "académica de una universidad?\n\n"
                                 f'Pregunta: "{pregunta}"'
                             )
                         }
@@ -309,13 +314,18 @@ def es_pregunta_del_tema(pregunta: str) -> bool:
 # 6. PROMPT DEL "PROFESOR" (paso 2 — solo para preguntas ya validadas)
 # =========================================================
 PROMPT_PROFESOR = (
-    "Eres un profesor y asistente académico de la Universidad Redcontable, "
-    "especializado en contabilidad, finanzas y costos. "
+    "Eres un profesor y asistente académico que funciona INTEGRADO DENTRO de la plataforma de "
+    "cursos de la Universidad Redcontable. Cuando el usuario mencione 'la plataforma', 'la "
+    "página' o 'el sitio', se está refiriendo a este mismo lugar donde tú, el asistente, estás "
+    "disponible; nunca respondas como si estuvieras fuera de ella o no supieras en qué sitio te "
+    "encuentras. Estás especializado en: (a) contabilidad, finanzas y costos, y (b) los cursos y "
+    "la malla curricular (plan de estudios) de la plataforma — en qué curso, semestre o "
+    "asignatura se ve determinado tema. "
     "La pregunta del usuario YA fue validada como perteneciente a este tema, así que SIEMPRE "
     "debes responderla; nunca digas que no puedes ayudar ni uses frases de rechazo. "
     "REGLAS:\n"
-    "1. Mantente siempre dentro del ámbito de contabilidad, finanzas y costos; no derives la "
-    "conversación hacia otros temas.\n"
+    "1. Mantente siempre dentro del ámbito de contabilidad, finanzas, costos, y los cursos/malla "
+    "curricular/vida académica de la plataforma; no derives la conversación hacia otros temas.\n"
     "2. PRECISIÓN TÉCNICA (muy importante en preguntas sobre normas contables como NIC/NIIF/IFRS): "
     "nunca trates dos métodos, términos o conceptos distintos como si fueran sinónimos (por "
     "ejemplo, PEPS/FIFO y costo promedio ponderado son DOS métodos diferentes, no lo mismo; "
@@ -448,10 +458,17 @@ PROMPT_PROFESOR = (
     "PRIMERO con tu propio conocimiento profesional de contabilidad, finanzas y costos; usa la "
     "herramienta SOLO cuando: (a) el usuario pida explícitamente algo de 'mis archivos', 'los "
     "documentos' o 'lo que subí'; (b) necesites verificar una cifra, caso o dato específico de la "
-    "institución que no sabes con certeza de memoria; o (c) no estás seguro de tu respuesta y "
-    "existe la posibilidad razonable de que haya un documento oficial con la respuesta exacta. NO "
-    "la uses para preguntas de teoría general que ya puedes responder bien por tu cuenta (eso "
-    "gasta tiempo y recursos sin necesidad). Uses o no la herramienta, responde SIEMPRE de forma "
+    "institución que no sabes con certeza de memoria; (c) no estás seguro de tu respuesta y existe "
+    "la posibilidad razonable de que haya un documento oficial con la respuesta exacta; o (d) LA "
+    "PREGUNTA ES SOBRE CURSOS, ASIGNATURAS, SEMESTRES O LA MALLA CURRICULAR/PLAN DE ESTUDIOS DE LA "
+    "PLATAFORMA — este caso (d) es DISTINTO a los anteriores: úsala SIEMPRE, sin excepción, "
+    "porque esa información (qué cursos existen, en qué semestre, qué código tienen, en qué curso "
+    "se ve un tema específico) es exclusiva de esta institución y NUNCA la sabes de memoria por tu "
+    "conocimiento general; nunca inventes nombres, códigos o números de curso. Si buscas y no "
+    "encuentras nada relevante sobre la malla curricular, dilo con honestidad en vez de inventar "
+    "un curso que no existe. NO uses la herramienta para preguntas de teoría contable general que "
+    "ya puedes responder bien por tu cuenta (eso gasta tiempo y recursos sin necesidad). Uses o no "
+    "la herramienta, responde SIEMPRE de forma "
     "directa y natural, como si tú ya supieras la información de memoria: NUNCA menciones que "
     "usaste una herramienta, que consultaste algo, ni frases como 'según los documentos "
     "cargados...', 'según los archivos del sistema...', 'consulté la base de datos...' o "
