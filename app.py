@@ -73,7 +73,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.4.1"
+VERSION = "ALPHA 0.3.9"
 
 # MODO DEBUG TEMPORAL: cuando está en True, muestra abajo de cada respuesta
 # de cursos/malla curricular un cuadro con el resultado CRUDO (sin filtrar
@@ -333,45 +333,6 @@ def buscar_en_malla_curricular(pregunta: str) -> str:
     return buscar_en_kb(consulta_reforzada, max_fragmentos=15)
 
 
-# =========================================================
-# 5.c DETECCIÓN DE PREGUNTAS SOBRE UNA NORMA CONTABLE ESPECÍFICA
-#     (NIC/NIIF/NIA/IFRS/IAS/ISA + número)
-# =========================================================
-# Mismo problema que con la malla curricular, pero con normas: el modelo
-# puede tener información desactualizada o directamente NO conocer una norma
-# nueva (por ejemplo la NIIF 18, emitida en 2024, con vigencia a partir de
-# 2027) y, en vez de admitirlo, INVENTA con toda confianza una explicación
-# falsa (se confirmó probando el bot: afirmó que "la NIIF 18 fue reemplazada
-# por la NIIF 15", algo completamente falso e ilógico). El usuario sube a S3
-# justo los documentos oficiales de normas nuevas o específicas para cubrir
-# este vacío, así que aquí también la aplicación fuerza la búsqueda en la
-# Knowledge Base ANTES de generar la respuesta, en vez de dejarlo a
-# discreción del modelo (regla 7 del prompt).
-PATRON_NORMA_CONTABLE = re.compile(
-    r"\b(NIIF|NIC|NIA|IFRS|IAS|ISA)\s*-?\s*(\d{1,3})\b", re.IGNORECASE
-)
-
-
-def norma_contable_mencionada(pregunta: str):
-    """Devuelve 'NIIF 18' (por ejemplo) si la pregunta menciona una norma
-    específica con número, o None si no menciona ninguna."""
-    m = PATRON_NORMA_CONTABLE.search(pregunta)
-    if not m:
-        return None
-    return f"{m.group(1).upper()} {m.group(2)}"
-
-
-def buscar_norma_contable(pregunta: str, norma: str) -> str:
-    """
-    Wrapper de buscar_en_kb() para preguntas sobre una norma contable
-    específica: refuerza la consulta con el nombre exacto de la norma para
-    apuntar al documento oficial correcto (sobre todo útil para normas
-    nuevas o poco comunes que el usuario haya subido a S3).
-    """
-    consulta_reforzada = f"{pregunta} (texto oficial y aplicación de la norma {norma})"
-    return buscar_en_kb(consulta_reforzada, max_fragmentos=12)
-
-
 def es_pregunta_del_tema(pregunta: str) -> bool:
     # Capa 1: coincidencia rápida y confiable por palabras clave
     if contiene_palabra_clave(pregunta):
@@ -502,20 +463,6 @@ PROMPT_PROFESOR = (
     "identificados que son 'materiales y generalizados' (es decir, ya hay evidencia suficiente "
     "obtenida), la respuesta correcta es SIEMPRE opinión adversa/desfavorable — la abstención de "
     "opinión es por falta de evidencia suficiente, nunca por la sola magnitud del error.\n"
-    "   - NIIF 18 vs. NIC 18 — NUNCA las confundas, son DOS normas completamente distintas y sin "
-    "relación entre sí, a pesar de compartir el número: la NIIF 18 ('Presentación y Divulgación "
-    "en los Estados Financieros' / 'Presentation and Disclosure in Financial Statements') es una "
-    "norma NUEVA, emitida por el IASB en abril de 2024, con vigencia obligatoria para periodos "
-    "que comiencen a partir del 1 de enero de 2027; su tema es cómo se estructuran y presentan "
-    "los estados financieros (nuevas categorías del estado de resultados —operativa, inversión y "
-    "financiación—, la métrica 'utilidad operativa', y requisitos de agregación/desagregación), y "
-    "REEMPLAZA a la NIC 1 (Presentación de Estados Financieros), no a la NIC 18. La NIC 18 "
-    "('Ingresos de Actividades Ordinarias' / 'Revenue'), en cambio, es una norma ANTIGUA sobre "
-    "reconocimiento de ingresos que ya fue derogada y reemplazada por la NIIF 15 desde 2018, y no "
-    "tiene ninguna relación con la NIIF 18. Si el usuario pregunta por la 'NIIF 18' (o 'IFRS 18'), "
-    "trátala siempre como la norma nueva de presentación de estados financieros que reemplaza a la "
-    "NIC 1 — nunca como si fuera una actualización o sucesora de la NIC 18, ni mezcles el "
-    "contenido de una con la otra.\n"
     "4. SIEMPRE que tu respuesta se apoye en una norma técnica (NIC, NIIF, NIA, US GAAP/ASC, "
     "COSO, etc.), menciona explícitamente dentro del texto el nombre y número de esa norma como "
     "parte natural de la explicación (por ejemplo: 'según la NIC 16, párrafo 39...' o 'conforme "
@@ -608,20 +555,7 @@ PROMPT_PROFESOR = (
     "cargados...', 'según los archivos del sistema...', 'consulté la base de datos...' o "
     "similares — ni aunque hayas encontrado algo relevante, ni aunque no hayas encontrado nada. "
     "El usuario no debe notar ninguna diferencia entre una respuesta que viene de tu conocimiento "
-    "y una que se apoyó en la herramienta; simplemente responde el contenido.\n"
-    "8. NUNCA muestres tu razonamiento interno como texto visible: no uses etiquetas ni bloques "
-    "como '<thinking>', '<razonamiento>', '[pensando]', 'Chain of Thought:' o similares, ni "
-    "escribas frases tipo 'Dado que...' explicando cómo decidiste responder antes de dar la "
-    "respuesta. Ve directo a la respuesta final, redactada de forma natural, sin exponer los "
-    "pasos internos de tu análisis.\n"
-    "9. NORMAS CONTABLES NUEVAS O POCO COMUNES (por ejemplo NIIF 18 u otra norma reciente): tu "
-    "conocimiento tiene una fecha de corte y puede NO incluir normas emitidas después de esa "
-    "fecha, o puede tener información incompleta sobre normas poco comunes. NUNCA afirmes que una "
-    "norma 'fue reemplazada por' otra, ni inventes su contenido, alcance o fecha de vigencia, "
-    "basándote solo en que el número o el nombre te resulta parecido a otra norma que sí conoces "
-    "bien. Si no tienes certeza sobre una norma específica y no hay un resultado de búsqueda que "
-    "la respalde, dilo con honestidad en vez de adivinar — es preferible admitir que no tienes "
-    "información confiable sobre esa norma en particular que inventar una explicación incorrecta."
+    "y una que se apoyó en la herramienta; simplemente responde el contenido."
 )
 
 
@@ -634,27 +568,6 @@ def escapar_signos_dolar(texto: str) -> str:
     Escapamos cada "$" como "\\$" para que Streamlit lo muestre literal.
     """
     return texto.replace("$", r"\$")
-
-
-# Patrón defensivo: aunque la regla 8 de PROMPT_PROFESOR le prohíbe al modelo
-# mostrar su razonamiento interno, un prompt por sí solo no es 100% confiable
-# (ya se vio con la instrucción de "no inventes cursos", que a veces se
-# ignoraba). Por eso además se limpia programáticamente cualquier bloque
-# '<thinking>...</thinking>' (o variantes) que se cuele en la respuesta,
-# como red de seguridad adicional.
-_PATRON_THINKING = re.compile(
-    r"<\s*(thinking|razonamiento|pensamiento)\s*>.*?<\s*/\s*\1\s*>",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def quitar_bloques_pensamiento(texto: str) -> str:
-    """Elimina cualquier bloque de razonamiento interno tipo '<thinking>...
-    </thinking>' que el modelo haya incluido por error en la respuesta
-    visible, y limpia los espacios/saltos de línea sobrantes que deja."""
-    limpio = _PATRON_THINKING.sub("", texto)
-    limpio = re.sub(r"\n{3,}", "\n\n", limpio).strip()
-    return limpio
 
 
 # Cuántos intercambios anteriores (pregunta del usuario + respuesta del bot)
@@ -917,28 +830,6 @@ def generar_respuesta_final(pregunta: str) -> str:
             "contenido que no aparezca literalmente en el resultado de arriba."
         )
 
-    norma = norma_contable_mencionada(pregunta)
-    if norma:
-        resultado_norma = buscar_norma_contable(pregunta, norma)
-        if MODO_DEBUG_KB:
-            st.session_state["debug_ultima_busqueda_kb"] = resultado_norma
-        texto_usuario += (
-            f"\n\n[Resultado de la búsqueda en los archivos oficiales sobre {norma}:]\n"
-            f"{resultado_norma}\n\n"
-            f"INSTRUCCIÓN CRÍTICA sobre {norma}: puede ser una norma nueva, poco común, "
-            "o que se emitió después de tu fecha de conocimiento — en ese caso tu "
-            "memoria sobre ella puede ser incompleta, estar desactualizada o "
-            "simplemente no existir, aunque te 'suene' a algo. NUNCA afirmes que una "
-            "norma 'fue reemplazada por' otra, ni describas su contenido, alcance o "
-            "fecha de vigencia, a menos que el resultado de la búsqueda de arriba lo "
-            "confirme explícitamente. Si el resultado NO trae información suficiente "
-            f"sobre {norma}, dilo con toda honestidad (por ejemplo: 'no tengo "
-            f"información confiable y verificada sobre {norma} en este momento') y "
-            "sugiere consultar el texto oficial de IFAC/IASB o los documentos "
-            "cargados en la plataforma. Inventar detalles de una norma contable es un "
-            "error grave: puede enseñar mal a un estudiante."
-        )
-
     mensajes = construir_historial_bedrock() + [
         {"role": "user", "content": [{"text": texto_usuario}]}
     ]
@@ -1056,22 +947,6 @@ def analizar_imagen(pregunta: str, archivo) -> str:
             "aparezca literalmente ahí."
         )
 
-    # Igual que arriba, pero para preguntas sobre una norma contable
-    # específica (NIC/NIIF/NIA + número) acompañando al adjunto.
-    norma = norma_contable_mencionada(pregunta) if pregunta else None
-    if norma:
-        resultado_norma = buscar_norma_contable(pregunta, norma)
-        if MODO_DEBUG_KB:
-            st.session_state["debug_ultima_busqueda_kb"] = resultado_norma
-        texto_usuario += (
-            f"\n\n[Resultado de la búsqueda en los archivos oficiales sobre {norma}:]\n"
-            f"{resultado_norma}\n\n"
-            f"INSTRUCCIÓN CRÍTICA sobre {norma}: si el resultado anterior NO trae "
-            "información suficiente, dilo con honestidad en vez de inventar el "
-            "contenido, alcance o vigencia de la norma, o afirmar que fue "
-            "reemplazada por otra sin evidencia de ello."
-        )
-
     contenido = [
         bloque_archivo,
         {"text": texto_usuario},
@@ -1175,7 +1050,6 @@ if entrada:
                         except Exception as e:
                             full_response = f"⚠️ Error al generar la respuesta: {e}"
 
-            full_response = quitar_bloques_pensamiento(full_response)
             full_response = escapar_signos_dolar(full_response)
             message_placeholder.markdown(full_response)
 
