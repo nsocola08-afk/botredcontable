@@ -73,7 +73,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.3.8"
+VERSION = "ALPHA 0.3.9"
 
 # MODO DEBUG TEMPORAL: cuando está en True, muestra abajo de cada respuesta
 # de cursos/malla curricular un cuadro con el resultado CRUDO (sin filtrar
@@ -84,7 +84,7 @@ VERSION = "ALPHA 0.3.8"
 # de ver qué está pasando realmente del lado de AWS. PONLO EN False otra vez
 # una vez que quede resuelto el problema (no debe quedar visible para los
 # estudiantes en producción).
-MODO_DEBUG_KB = True
+MODO_DEBUG_KB = False
 
 MENSAJE_RECHAZO = (
     "Lo siento, solo puedo responder preguntas de contabilidad, finanzas, costos, o sobre los "
