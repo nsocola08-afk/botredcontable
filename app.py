@@ -144,7 +144,7 @@ MODEL_ARN_CLASIFICACION = "arn:aws:bedrock:us-east-1::foundation-model/amazon.no
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.0.29"
+VERSION = "ALPHA 0.0.30"
 
 # Documento oficial de la malla curricular / plan de estudios. Cuando el
 # usuario pregunta por cursos, asignaturas, semestres o "la malla", se
@@ -567,7 +567,36 @@ PROMPT_PROFESOR = (
     "   - Ejemplo de qué evitar: enumerar los 6 criterios de un párrafo de la NIC 38 todos "
     "seguidos dentro de una sola oración larga. Ejemplo de qué hacer: presentarlos como una lista "
     "corta, cada uno en su propia línea con viñeta, y una frase de cierre aparte con la "
-    "conclusión."
+    "conclusión.\n"
+    "11. ASIENTOS CONTABLES Y CUADROS DE PARTIDA DOBLE (Debe/Haber) — cuando debas mostrar un "
+    "asiento contable o un cuadro de partida doble, sigue estas reglas de forma ESTRICTA, sin "
+    "excepción:\n"
+    "   - NUNCA escribas el código contable de la cuenta (por ejemplo, no escribas "
+    "'5001 Costo de Ventas' ni '0120 Almacén'), aunque el documento fuente de la Knowledge Base "
+    "sí use codificación de cuentas. Escribe ÚNICAMENTE el nombre de la cuenta ('Costo de "
+    "Ventas', 'Almacén', 'Caja', 'Cuentas por Cobrar', 'Ventas', etc.), nunca el código numérico "
+    "que la precede. El código de cuenta pertenece al plan de cuentas interno de cada empresa "
+    "(varía de una a otra) y no aporta nada a la explicación pedagógica; solo genera confusión.\n"
+    "   - Presenta el asiento como una tabla markdown con exactamente estas columnas: 'Cuenta', "
+    "'Debe (US$)' y 'Haber (US$)' (ajusta la moneda si el ejercicio usa otra).\n"
+    "   - Antes de escribir la tabla, calcula mentalmente (paso a paso, con cuidado) el monto "
+    "que corresponde a cada cuenta, y luego SUMA todos los montos que vas a poner en la columna "
+    "Debe y todos los que vas a poner en la columna Haber. Ambos totales deben ser EXACTAMENTE "
+    "iguales (partida doble). Si no cuadran, revisa tu cálculo y corrígelo antes de responder: "
+    "nunca muestres al usuario un asiento descuadrado ni una tabla con montos inventados o mal "
+    "ubicados.\n"
+    "   - En la fila de cada cuenta que se DEBITA, coloca su monto ÚNICAMENTE en la columna "
+    "Debe y deja la columna Haber vacía en esa misma fila. En la fila de cada cuenta que se "
+    "ACREDITA, coloca su monto ÚNICAMENTE en la columna Haber y deja la columna Debe vacía en "
+    "esa misma fila. Nunca pongas un monto en ambas columnas de la misma fila, y nunca dejes una "
+    "fila con las dos columnas vacías o con un monto de '0'.\n"
+    "   - Si el asiento es compuesto (más de una cuenta debitada y/o acreditada), agrega una "
+    "fila por cada cuenta involucrada, cada una con su monto solo en la columna que le "
+    "corresponde; la suma total de la columna Debe debe seguir siendo igual a la suma total de "
+    "la columna Haber.\n"
+    "   - Después de la tabla puedes agregar una explicación breve, en prosa o en una lista con "
+    "viñetas, de cómo se calculó cada monto (por ejemplo: cantidad × costo unitario). Esa "
+    "explicación tampoco debe mencionar códigos de cuenta, solo los nombres de las cuentas."
 )
 
 
