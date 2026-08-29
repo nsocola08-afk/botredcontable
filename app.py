@@ -150,7 +150,7 @@ MODEL_ARN_CLASIFICACION = "arn:aws:bedrock:us-east-1::foundation-model/amazon.no
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.0.32"
+VERSION = "ALPHA 0.0.33"
 
 # Documento oficial de la malla curricular / plan de estudios. Cuando el
 # usuario pregunta por cursos, asignaturas, semestres o "la malla", se
@@ -853,6 +853,26 @@ def formatear_fuentes(fuentes: list) -> str:
     return bloque
 
 
+def nota_conocimiento_general() -> str:
+    """
+    Bloque markdown que se muestra cuando la Knowledge Base (S3) NO devolvió
+    ninguna fuente relevante para la pregunta, y la respuesta se generó con
+    el conocimiento profesional general del modelo (ver la regla 3 de
+    PROMPT_PROFESOR: si el contexto no tiene la respuesta exacta, igual se
+    responde aclarando que esa parte no viene de un documento oficial).
+
+    Reemplaza al mensaje anterior ("Se utilizaron diversas fuentes
+    documentadas para esta consulta"), que era engañoso: afirmaba justo lo
+    contrario de lo que había pasado en ese caso (cero fuentes encontradas).
+    """
+    return (
+        "\n\n---\n_ℹ️ No se encontró un documento oficial exacto para esta "
+        "consulta entre los archivos cargados en el sistema; esta respuesta "
+        "se elaboró con conocimiento profesional general de contabilidad, "
+        "finanzas o costos._"
+    )
+
+
 def formato_imagen_bedrock(nombre_archivo: str) -> str:
     """Convierte la extensión del archivo subido al 'format' que espera el
     bloque de imagen de Bedrock Converse ('png', 'jpeg', 'webp')."""
@@ -1079,8 +1099,11 @@ if entrada:
                         contexto_kb, fuentes = obtener_contexto_kb(prompt)
                         full_response = analizar_imagen(prompt, archivo_imagen, contexto_kb)
 
-                        if MENSAJE_RECHAZO.strip() not in full_response and fuentes:
-                            full_response += formatear_fuentes(fuentes)
+                        if MENSAJE_RECHAZO.strip() not in full_response:
+                            if fuentes:
+                                full_response += formatear_fuentes(fuentes)
+                            else:
+                                full_response += nota_conocimiento_general()
                     except Exception as e:
                         etiqueta_error = "el PDF" if archivo_es_pdf else "la imagen"
                         full_response = f"⚠️ Error al analizar {etiqueta_error}: {e}"
@@ -1109,10 +1132,7 @@ if entrada:
                                 if fuentes:
                                     full_response += formatear_fuentes(fuentes)
                                 else:
-                                    full_response += (
-                                        "\n\n---\n_ℹ️ Se utilizaron diversas fuentes "
-                                        "documentadas para esta consulta._"
-                                    )
+                                    full_response += nota_conocimiento_general()
                         except Exception as e:
                             full_response = (
                                 f"⚠️ Error al consultar la Base de Conocimientos: {e}"
