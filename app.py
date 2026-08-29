@@ -73,7 +73,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.3.6"
+VERSION = "ALPHA 0.3.7"
 
 # MODO DEBUG TEMPORAL: cuando está en True, muestra abajo de cada respuesta
 # de cursos/malla curricular un cuadro con el resultado CRUDO (sin filtrar
@@ -325,7 +325,12 @@ def buscar_en_malla_curricular(pregunta: str) -> str:
         "estudios de la plataforma Universidad Redcontable / "
         "universidadredcontable)"
     )
-    return buscar_en_kb(consulta_reforzada)
+    # Se piden más fragmentos que el default (6) porque el documento de la
+    # malla curricular suele tener MUCHOS cursos listados, y el curso que
+    # el usuario busca puede quedar en un fragmento/chunk que no entra en
+    # los primeros resultados si se pide muy poco. Pedir más aumenta la
+    # probabilidad de que el fragmento correcto sí llegue al modelo.
+    return buscar_en_kb(consulta_reforzada, max_fragmentos=15)
 
 
 def es_pregunta_del_tema(pregunta: str) -> bool:
