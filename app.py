@@ -1,29 +1,36 @@
 """
 Asistente Contable - Universidad Redcontable
 =============================================
-Chatbot académico basado ÚNICAMENTE en Amazon Nova Pro (sin Knowledge Base,
-sin S3, sin Pinecone): toda la respuesta sale del propio modelo, guiado por
-el prompt de "profesor" (PROMPT_PROFESOR) definido en este archivo. Usa dos
-modelos Nova según la tarea: Nova Micro para la clasificación rápida de tema
-(barato, tarea simple) y Nova Pro para generar la respuesta final (el
-modelo más capaz de la familia Nova v1).
+Chatbot académico impulsado por Amazon Nova Pro, guiado por el prompt de
+"profesor" (PROMPT_PROFESOR) definido en este archivo. Usa dos modelos Nova
+según la tarea: Nova Micro para la clasificación rápida de tema (barato,
+tarea simple) y Nova Pro para generar la respuesta final (el modelo más
+capaz de la familia Nova v1).
 
 Requerimientos implementados:
 1. Interfaz Streamlit en rojo/blanco con título, subtítulo y botón de chat
    personalizados, y elementos por defecto de Streamlit ocultos.
 2. El bot actúa como profesor especializado ÚNICAMENTE en contabilidad,
-   finanzas y costos, usando solo el conocimiento del modelo Nova Pro (no
-   hay documentos institucionales conectados):
+   finanzas y costos:
      - Si la pregunta es del tema, siempre responde con su conocimiento
        profesional.
      - Si la pregunta NO es del tema, responde EXACTA y EXCLUSIVAMENTE con
        el mensaje de rechazo.
-3. Permite adjuntar una imagen (recibo, balance, ejercicio, captura) o un
+3. Responde PRINCIPALMENTE con el conocimiento propio de Nova Pro, pero
+   tiene disponible una HERRAMIENTA (function calling / tool use de Bedrock
+   Converse, ver HERRAMIENTA_BUSCAR_ARCHIVOS y buscar_en_kb) para consultar
+   la Knowledge Base (S3) SOLO cuando el propio modelo decide que la
+   necesita: una cifra, un caso o un documento específico de la institución
+   que no sabe con certeza de memoria. No es una búsqueda obligatoria en
+   cada pregunta como antes: el modelo elige si la usa o no (ver
+   _llamar_converse_con_herramientas).
+4. Permite adjuntar una imagen (recibo, balance, ejercicio, captura) o un
    archivo PDF (examen, guía, estado financiero, etc.) junto al mensaje de
    texto. La generación de la respuesta SIEMPRE pasa por Nova Pro en modo
    multimodal vía bedrock_runtime.converse() (con un bloque "image" o
-   "document" según corresponda cuando hay adjunto).
-4. Tiene memoria de la CONVERSACIÓN dentro de la sesión actual: cada
+   "document" según corresponda cuando hay adjunto), y también puede usar
+   la herramienta de búsqueda si lo necesita.
+5. Tiene memoria de la CONVERSACIÓN dentro de la sesión actual: cada
    pregunta se envía junto con el historial de turnos anteriores de esa
    misma sesión de Streamlit (ver construir_historial_bedrock), así que el
    bot entiende repreguntas como "¿y con el otro método?" sin que el
@@ -53,6 +60,12 @@ COLOR_FONDO = "#FFFFFF"
 
 AWS_REGION = "us-east-1"
 
+# ID de la Knowledge Base de Bedrock (S3 + Pinecone) que la herramienta
+# buscar_en_kb() consulta bajo demanda (ver HERRAMIENTA_BUSCAR_ARCHIVOS).
+# Es el mismo ID que se usaba antes; si tu Knowledge Base cambió de ID,
+# actualízalo aquí.
+KB_ID = "2SESL9R1VO"
+
 # Modelo generador de respuestas (usado vía bedrock_runtime.converse(), ver
 # generar_respuesta_final y analizar_imagen). Nova Pro v1 está disponible en
 # us-east-1 como foundation-model "normal" (sin cross-region inference
@@ -68,7 +81,7 @@ MODEL_ARN_CLASIFICACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazo
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.1.0"
+VERSION = "ALPHA 0.2.1"
 
 MENSAJE_RECHAZO = (
     "Lo siento, solo puedo responder preguntas de contabilidad, finanzas y costos."
@@ -170,19 +183,23 @@ with col_centro:
 st.markdown("<p class='subtitulo' style='text-align:center;'>Profesor y asistente de la plataforma</p>", unsafe_allow_html=True)
 
 # =========================================================
-# 3. CLIENTE DE AWS BEDROCK
+# 3. CLIENTES DE AWS BEDROCK
 # =========================================================
-# Un único cliente bedrock-runtime: se usa tanto para generar la respuesta
-# final (converse() con Nova Pro) como para la clasificación rápida de tema
-# (converse() con Nova Micro).
+# - bedrock-runtime: para generar la respuesta final (converse() con Nova
+#   Pro) y para la clasificación rápida de tema (converse() con Nova Micro).
+# - bedrock-agent-runtime: SOLO para la herramienta buscar_en_kb() (ver más
+#   abajo), que el modelo invoca bajo demanda vía tool use, no en cada
+#   pregunta.
 @st.cache_resource(show_spinner=False)
-def obtener_cliente_bedrock():
+def obtener_clientes_bedrock():
     session = boto3.Session(region_name=AWS_REGION)
-    return session.client(service_name="bedrock-runtime")
+    runtime_client = session.client(service_name="bedrock-runtime")
+    agent_client = session.client(service_name="bedrock-agent-runtime")
+    return runtime_client, agent_client
 
 
 try:
-    bedrock_runtime = obtener_cliente_bedrock()
+    bedrock_runtime, bedrock_agent = obtener_clientes_bedrock()
 except Exception as e:
     st.error(f"❌ No se pudo inicializar la conexión con AWS Bedrock: {e}")
     st.stop()
@@ -425,7 +442,22 @@ PROMPT_PROFESOR = (
     "la columna Haber.\n"
     "   - Después de la tabla puedes agregar una explicación breve, en prosa o en una lista con "
     "viñetas, de cómo se calculó cada monto (por ejemplo: cantidad × costo unitario). Esa "
-    "explicación tampoco debe mencionar códigos de cuenta, solo los nombres de las cuentas."
+    "explicación tampoco debe mencionar códigos de cuenta, solo los nombres de las cuentas.\n"
+    "7. HERRAMIENTA 'buscar_en_archivos': tienes disponible esta herramienta para consultar los "
+    "archivos oficiales de la Universidad Redcontable cuando de verdad la necesites. RESPONDE "
+    "PRIMERO con tu propio conocimiento profesional de contabilidad, finanzas y costos; usa la "
+    "herramienta SOLO cuando: (a) el usuario pida explícitamente algo de 'mis archivos', 'los "
+    "documentos' o 'lo que subí'; (b) necesites verificar una cifra, caso o dato específico de la "
+    "institución que no sabes con certeza de memoria; o (c) no estás seguro de tu respuesta y "
+    "existe la posibilidad razonable de que haya un documento oficial con la respuesta exacta. NO "
+    "la uses para preguntas de teoría general que ya puedes responder bien por tu cuenta (eso "
+    "gasta tiempo y recursos sin necesidad). Uses o no la herramienta, responde SIEMPRE de forma "
+    "directa y natural, como si tú ya supieras la información de memoria: NUNCA menciones que "
+    "usaste una herramienta, que consultaste algo, ni frases como 'según los documentos "
+    "cargados...', 'según los archivos del sistema...', 'consulté la base de datos...' o "
+    "similares — ni aunque hayas encontrado algo relevante, ni aunque no hayas encontrado nada. "
+    "El usuario no debe notar ninguna diferencia entre una respuesta que viene de tu conocimiento "
+    "y una que se apoyó en la herramienta; simplemente responde el contenido."
 )
 
 
@@ -493,26 +525,164 @@ def construir_historial_bedrock(max_turnos: int = MAX_TURNOS_HISTORIAL) -> list:
     return mensajes
 
 
-def generar_respuesta_final(pregunta: str) -> str:
-    """
-    Genera la respuesta final del profesor con bedrock_runtime.converse()
-    (Nova Pro, sin ningún contexto externo: solo el conocimiento del
-    modelo), agregando el HISTORIAL de la conversación de la sesión actual
-    (ver construir_historial_bedrock) para que el bot recuerde preguntas y
-    respuestas anteriores dentro de la misma sesión de Streamlit.
-    """
-    mensajes = construir_historial_bedrock() + [
-        {"role": "user", "content": [{"text": pregunta.strip()}]}
-    ]
+# =========================================================
+# HERRAMIENTA: consulta bajo demanda a la Knowledge Base (S3)
+# =========================================================
+# A diferencia del diseño anterior (donde SIEMPRE se hacía un retrieve()
+# antes de generar la respuesta), aquí el modelo decide por sí mismo si
+# necesita consultar los archivos oficiales, usando "tool use" / function
+# calling de Bedrock Converse. Ver la regla 7 de PROMPT_PROFESOR para las
+# instrucciones de CUÁNDO debe usarla.
+HERRAMIENTA_BUSCAR_ARCHIVOS = {
+    "toolSpec": {
+        "name": "buscar_en_archivos",
+        "description": (
+            "Busca información específica en los archivos oficiales de la "
+            "Universidad Redcontable guardados en la Knowledge Base (S3). "
+            "Úsala SOLO cuando necesites verificar un dato, cifra, caso o "
+            "documento propio de la institución que no sepas con certeza "
+            "por tu conocimiento general, o cuando el usuario pida algo "
+            "explícitamente de 'sus archivos' o 'los documentos'. NO la "
+            "uses para preguntas de teoría general de contabilidad, "
+            "finanzas o costos que ya puedas responder bien por tu cuenta."
+        ),
+        "inputSchema": {
+            "json": {
+                "type": "object",
+                "properties": {
+                    "consulta": {
+                        "type": "string",
+                        "description": (
+                            "Los términos de búsqueda o la pregunta a "
+                            "buscar en los archivos oficiales."
+                        ),
+                    }
+                },
+                "required": ["consulta"],
+            }
+        },
+    }
+}
 
+
+def buscar_en_kb(consulta: str, max_fragmentos: int = 6) -> str:
+    """
+    Hace un retrieve() (SIN generación) sobre la Knowledge Base y devuelve
+    un texto plano con los fragmentos encontrados, listo para mandarse de
+    vuelta al modelo como resultado de la herramienta buscar_en_archivos.
+
+    Si falla, no hay Knowledge Base configurada, o no hay resultados,
+    devuelve un mensaje explicándolo (en vez de lanzar una excepción), para
+    que el modelo pueda seguir respondiendo con su conocimiento general sin
+    que se rompa la conversación.
+    """
+    if not consulta:
+        return "No se encontró ningún archivo relevante para esa búsqueda."
+
+    try:
+        resp = bedrock_agent.retrieve(
+            knowledgeBaseId=KB_ID,
+            retrievalQuery={"text": consulta},
+            retrievalConfiguration={
+                "vectorSearchConfiguration": {"numberOfResults": max_fragmentos}
+            },
+        )
+    except Exception as e:
+        return f"No se pudo consultar la Knowledge Base en este momento ({e})."
+
+    fragmentos = [
+        r.get("content", {}).get("text", "")
+        for r in resp.get("retrievalResults", [])
+        if r.get("content", {}).get("text")
+    ]
+    if not fragmentos:
+        return "No se encontró ningún archivo relevante para esa búsqueda."
+
+    return "\n\n".join(fragmentos)
+
+
+# Cuántas veces, como máximo, se le permite al modelo pedir la herramienta
+# en una misma pregunta, antes de forzar una respuesta final sin más
+# búsquedas (evita un loop infinito si el modelo insiste en buscar).
+MAX_ITERACIONES_HERRAMIENTA = 3
+
+
+def _ejecutar_herramienta(bloque_tool_use: dict) -> dict:
+    """Ejecuta la herramienta que el modelo pidió usar y arma el bloque
+    'toolResult' que se le devuelve en el siguiente turno."""
+    nombre = bloque_tool_use.get("name")
+    tool_use_id = bloque_tool_use.get("toolUseId")
+    entrada = bloque_tool_use.get("input") or {}
+
+    if nombre == "buscar_en_archivos":
+        resultado_texto = buscar_en_kb((entrada.get("consulta") or "").strip())
+        status = "success"
+    else:
+        resultado_texto = f"Herramienta desconocida: {nombre}"
+        status = "error"
+
+    return {
+        "toolResult": {
+            "toolUseId": tool_use_id,
+            "content": [{"text": resultado_texto}],
+            "status": status,
+        }
+    }
+
+
+def _llamar_converse_con_herramientas(system_prompt: str, mensajes: list) -> str:
+    """
+    Llama a bedrock_runtime.converse() dándole al modelo la herramienta
+    buscar_en_archivos. Si el modelo decide usarla (stopReason == "tool_use"),
+    se ejecuta la búsqueda y se le devuelve el resultado en un nuevo turno,
+    repitiendo hasta MAX_ITERACIONES_HERRAMIENTA veces. Devuelve el texto de
+    la respuesta final.
+    """
+    mensajes = list(mensajes)
+    for _ in range(MAX_ITERACIONES_HERRAMIENTA):
+        response = bedrock_runtime.converse(
+            modelId=MODEL_ARN_GENERACION,
+            system=[{"text": system_prompt}],
+            messages=mensajes,
+            inferenceConfig={"maxTokens": 4000, "temperature": 0.0},
+            toolConfig={"tools": [HERRAMIENTA_BUSCAR_ARCHIVOS]},
+        )
+        bloques = response.get("output", {}).get("message", {}).get("content", [])
+
+        if response.get("stopReason") != "tool_use":
+            return "".join(b.get("text", "") for b in bloques).strip()
+
+        # El modelo pidió usar la herramienta: se agrega su turno (con el
+        # bloque toolUse) y se le responde con el resultado de la búsqueda.
+        mensajes.append({"role": "assistant", "content": bloques})
+        resultados = [_ejecutar_herramienta(b["toolUse"]) for b in bloques if "toolUse" in b]
+        mensajes.append({"role": "user", "content": resultados})
+
+    # Se agotaron las iteraciones: una última llamada SIN la herramienta,
+    # para forzar una respuesta de cierre con lo que ya se sabe.
     response = bedrock_runtime.converse(
         modelId=MODEL_ARN_GENERACION,
-        system=[{"text": PROMPT_PROFESOR}],
+        system=[{"text": system_prompt}],
         messages=mensajes,
         inferenceConfig={"maxTokens": 4000, "temperature": 0.0},
     )
     bloques = response.get("output", {}).get("message", {}).get("content", [])
     return "".join(b.get("text", "") for b in bloques).strip()
+
+
+def generar_respuesta_final(pregunta: str) -> str:
+    """
+    Genera la respuesta final del profesor con bedrock_runtime.converse()
+    (Nova Pro), agregando el HISTORIAL de la conversación de la sesión
+    actual (ver construir_historial_bedrock) para que el bot recuerde
+    preguntas y respuestas anteriores dentro de la misma sesión de
+    Streamlit. El modelo puede, si lo decide, usar la herramienta
+    buscar_en_archivos (ver _llamar_converse_con_herramientas).
+    """
+    mensajes = construir_historial_bedrock() + [
+        {"role": "user", "content": [{"text": pregunta.strip()}]}
+    ]
+    return _llamar_converse_con_herramientas(PROMPT_PROFESOR, mensajes)
 
 
 def formato_imagen_bedrock(nombre_archivo: str) -> str:
@@ -619,15 +789,9 @@ def analizar_imagen(pregunta: str, archivo) -> str:
     # la sesión (construir_historial_bedrock) solo aporta memoria de TEXTO de
     # preguntas y respuestas anteriores, sin reenviar adjuntos previos.
     mensajes = construir_historial_bedrock() + [{"role": "user", "content": contenido}]
-
-    response = bedrock_runtime.converse(
-        modelId=MODEL_ARN_GENERACION,
-        system=[{"text": PROMPT_PROFESOR + PROMPT_PROFESOR_IMAGEN_EXTRA}],
-        messages=mensajes,
-        inferenceConfig={"maxTokens": 4000, "temperature": 0.0},
+    return _llamar_converse_con_herramientas(
+        PROMPT_PROFESOR + PROMPT_PROFESOR_IMAGEN_EXTRA, mensajes
     )
-    bloques = response.get("output", {}).get("message", {}).get("content", [])
-    return "".join(b.get("text", "") for b in bloques).strip()
 
 
 # =========================================================
