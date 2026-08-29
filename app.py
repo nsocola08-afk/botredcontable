@@ -59,11 +59,11 @@ COLOR_FONDO = "#FFFFFF"
 
 AWS_REGION = "us-east-1"
 
-# ID de la Knowledge Base de Bedrock (S3 + Pinecone) que la herramienta
-# buscar_en_kb() consulta bajo demanda (ver HERRAMIENTA_BUSCAR_ARCHIVOS).
-# Es el mismo ID que se usaba antes; si tu Knowledge Base cambió de ID,
+# ID de la Knowledge Base de Bedrock (S3 + Amazon OpenSearch Serverless) que
+# la herramienta buscar_en_kb() consulta bajo demanda (ver
+# HERRAMIENTA_BUSCAR_ARCHIVOS). Si tu Knowledge Base vuelve a cambiar de ID,
 # actualízalo aquí.
-KB_ID = "2SESL9R1VO"
+KB_ID = "DFWH2XFO4N"
 
 # Único modelo usado en todo el archivo (respuesta final Y clasificación
 # rápida de tema, ver es_pregunta_del_tema). Nova Pro v1 está disponible en
@@ -73,7 +73,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.3.3"
+VERSION = "ALPHA 0.3.4"
 
 MENSAJE_RECHAZO = (
     "Lo siento, solo puedo responder preguntas de contabilidad, finanzas, costos, o sobre los "
