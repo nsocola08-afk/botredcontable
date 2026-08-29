@@ -1,37 +1,29 @@
 """
 Asistente Contable - Universidad Redcontable
 =============================================
-Chatbot académico basado en Amazon Bedrock Knowledge Base (S3 + Pinecone).
-Usa dos modelos Nova según la tarea: Nova Micro para la clasificación rápida
-de tema (barato, tarea simple) y Nova Pro para generar la respuesta final
-(el modelo más capaz de la familia Nova v1, con mejor precisión y
-seguimiento de instrucciones que Nova Lite/Nova 2 Lite, a cambio de un
-costo notablemente más alto).
+Chatbot académico basado ÚNICAMENTE en Amazon Nova Pro (sin Knowledge Base,
+sin S3, sin Pinecone): toda la respuesta sale del propio modelo, guiado por
+el prompt de "profesor" (PROMPT_PROFESOR) definido en este archivo. Usa dos
+modelos Nova según la tarea: Nova Micro para la clasificación rápida de tema
+(barato, tarea simple) y Nova Pro para generar la respuesta final (el
+modelo más capaz de la familia Nova v1).
 
 Requerimientos implementados:
 1. Interfaz Streamlit en rojo/blanco con título, subtítulo y botón de chat
    personalizados, y elementos por defecto de Streamlit ocultos.
-2. Conexión exclusiva a la Knowledge Base de Bedrock (S3 + Pinecone) usando
-   Amazon Nova Pro como modelo generador y Nova Micro como clasificador
-   de tema.
-3. El bot actúa como profesor especializado ÚNICAMENTE en contabilidad,
-   finanzas, costos y la malla curricular de la institución:
-     - Si la pregunta es del tema pero no hay un documento exacto, responde
-       igual con conocimiento general (aclarándolo).
+2. El bot actúa como profesor especializado ÚNICAMENTE en contabilidad,
+   finanzas y costos, usando solo el conocimiento del modelo Nova Pro (no
+   hay documentos institucionales conectados):
+     - Si la pregunta es del tema, siempre responde con su conocimiento
+       profesional.
      - Si la pregunta NO es del tema, responde EXACTA y EXCLUSIVAMENTE con
-       el mensaje de rechazo, sin importar qué fragmentos sueltos existan
-       en los documentos.
-4. Muestra la fuente principal de S3 usada (nombre + fragmento) y, si se
-   consultó más de un archivo, un contador "(+N archivos más leídos)".
-5. Permite adjuntar una imagen (recibo, balance, ejercicio, captura de la
-   plataforma) o un archivo PDF (examen, guía, estado financiero, etc.)
-   junto al mensaje de texto. La generación de la respuesta SIEMPRE pasa
-   por Nova Pro en modo multimodal vía bedrock_runtime.converse() (con
-   un bloque "image" o "document" según corresponda cuando hay adjunto),
-   reforzada con fragmentos de la Knowledge Base como contexto de apoyo
-   (ver analizar_imagen, generar_respuesta_final, construir_bloque_adjunto
-   y obtener_contexto_kb).
-6. Tiene memoria de la CONVERSACIÓN dentro de la sesión actual: cada
+       el mensaje de rechazo.
+3. Permite adjuntar una imagen (recibo, balance, ejercicio, captura) o un
+   archivo PDF (examen, guía, estado financiero, etc.) junto al mensaje de
+   texto. La generación de la respuesta SIEMPRE pasa por Nova Pro en modo
+   multimodal vía bedrock_runtime.converse() (con un bloque "image" o
+   "document" según corresponda cuando hay adjunto).
+4. Tiene memoria de la CONVERSACIÓN dentro de la sesión actual: cada
    pregunta se envía junto con el historial de turnos anteriores de esa
    misma sesión de Streamlit (ver construir_historial_bedrock), así que el
    bot entiende repreguntas como "¿y con el otro método?" sin que el
@@ -42,7 +34,6 @@ Requerimientos implementados:
 
 import base64
 import re
-import urllib.parse
 
 import boto3
 import streamlit as st
@@ -61,118 +52,31 @@ COLOR_TEXTO = "#000000"
 COLOR_FONDO = "#FFFFFF"
 
 AWS_REGION = "us-east-1"
-KB_ID = "2SESL9R1VO"
-
-# ID de la cuenta de AWS donde vive la Knowledge Base. Actualmente NO se usa
-# para armar el ARN del modelo generador: Nova Pro v1 se invoca directo por
-# su foundation-model ID en us-east-1, sin necesitar un "cross-region
-# inference profile" (CRIS) ni incluir el Account ID en el ARN. Se deja
-# declarada por si más adelante se vuelve a usar un modelo que sí lo
-# requiera (por ejemplo Nova 2 Lite o Nova 2 Pro, que si lo necesitan).
-AWS_ACCOUNT_ID = "882427185799"
 
 # Modelo generador de respuestas (usado vía bedrock_runtime.converse(), ver
-# generar_respuesta_final y analizar_imagen). Nova Pro es el modelo más
-# capaz de la familia Nova v1: mejor precisión y seguimiento de
-# instrucciones que Nova Lite/Nova Micro, con ventana de contexto de 300K
-# tokens. A cambio, es notablemente más caro que Nova 2 Lite (según la
-# página de precios de Bedrock, revísala antes de un uso masivo) — conviene
-# vigilar el consumo si el volumen de preguntas es alto.
-#
-# A diferencia de Nova 2 Lite, Nova Pro v1 SÍ está disponible en us-east-1
-# como foundation-model "normal" (sin cross-region inference profile), así
-# que el ARN es del tipo "foundation-model/..." plano, igual que
-# MODEL_ARN_CLASIFICACION más abajo.
+# generar_respuesta_final y analizar_imagen). Nova Pro v1 está disponible en
+# us-east-1 como foundation-model "normal" (sin cross-region inference
+# profile), así que el ARN es del tipo "foundation-model/..." plano, igual
+# que MODEL_ARN_CLASIFICACION.
 MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.nova-pro-v1:0"
-
-# IMPORTANTE: Nova Pro v1 NO soporta "extended thinking" (razonamiento
-# ajustable), a diferencia de Nova 2 Lite/Nova 2 Pro. Por eso
-# generar_respuesta_final() y analizar_imagen() YA NO envían
-# additionalModelRequestFields con reasoningConfig: hacerlo con este modelo
-# devuelve un error de validación de Bedrock. NIVEL_RAZONAMIENTO_MAXIMO y
-# nivel_razonamiento_para() (más abajo) se dejan definidos sin usarse — no
-# hacen ninguna llamada a AWS, son solo una heurística en Python — por si
-# en el futuro se vuelve a usar un modelo Nova 2 que sí soporte esta
-# función.
-NIVEL_RAZONAMIENTO_MAXIMO = "medium"
-
-# Palabras que delatan una pregunta de varios pasos: cálculos, registros
-# contables o ejercicios completos, donde "medium" mejora la precisión
-# frente a "low" (ver diferencias documentadas por AWS entre niveles).
-PALABRAS_CLAVE_COMPLEJIDAD = [
-    "calcula", "calcular", "resuelve", "resolver", "elabora", "elaborar",
-    "registra", "registrar", "asiento", "asientos", "ejercicio",
-    "determina", "determinar", "contabiliza", "contabilizar",
-    "estado financiero", "flujo de caja", "depreciación", "amortiza",
-    "amortización", "provisión", "ajuste", "conciliación", "balance",
-    "estado de resultados", "paso a paso",
-]
-
-
-def nivel_razonamiento_para(pregunta: str, con_archivo_adjunto: bool = False) -> str:
-    """
-    Decide "low" o "medium" de extended thinking según la complejidad
-    aparente de la pregunta, sin llamar a ningún modelo (heurística
-    gratuita, igual de rápida que no tener el chequeo).
-
-    Usa "medium" cuando:
-    - hay un archivo adjunto (imagen/PDF de un ejercicio, examen o estado
-      financiero: casi siempre requieren varios pasos), o
-    - el texto contiene alguna palabra de PALABRAS_CLAVE_COMPLEJIDAD
-      (cálculos, registros contables, ejercicios), o
-    - la pregunta es larga (más de 220 caracteres) o trae varias
-      sub-preguntas encadenadas (2+ signos de interrogación).
-
-    En cualquier otro caso ("qué es...", "cuál es la diferencia entre...",
-    preguntas cortas de una sola parte) usa "low", más rápido y barato.
-    """
-    if con_archivo_adjunto:
-        return NIVEL_RAZONAMIENTO_MAXIMO
-
-    texto = pregunta.lower()
-
-    if any(palabra in texto for palabra in PALABRAS_CLAVE_COMPLEJIDAD):
-        return NIVEL_RAZONAMIENTO_MAXIMO
-
-    if len(pregunta) > 220:
-        return NIVEL_RAZONAMIENTO_MAXIMO
-
-    if texto.count("?") >= 2:
-        return NIVEL_RAZONAMIENTO_MAXIMO
-
-    return "low"
 
 # Modelo de clasificación rápida (SI/NO en es_pregunta_del_tema). Se deja en
 # Nova Micro a propósito: es la llamada de respaldo que más se repite y no
 # necesita más potencia para una tarea tan simple, así se mantiene el costo
 # lo más bajo posible.
-MODEL_ARN_CLASIFICACION = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0"
+MODEL_ARN_CLASIFICACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.nova-micro-v1:0"
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.0.33"
-
-# Documento oficial de la malla curricular / plan de estudios. Cuando el
-# usuario pregunta por cursos, asignaturas, semestres o "la malla", se
-# prioriza la búsqueda hacia este archivo (ver es_pregunta_de_malla y
-# consultar_knowledge_base).
-ARCHIVO_MALLA_CURRICULAR = "REDContable_MALLA_CURRICULAR_version_espanol.pdf"
+VERSION = "ALPHA 0.1.0"
 
 MENSAJE_RECHAZO = (
-    "Lo siento, solo puedo responder preguntas de contabilidad, finanzas y costos "
-    "basadas en los documentos oficiales de la Universidad Redcontable cargados en el sistema."
+    "Lo siento, solo puedo responder preguntas de contabilidad, finanzas y costos."
 )
 
 # =========================================================
 # Configuración para adjuntar imágenes (recibos, balances, ejercicios, etc.)
 # =========================================================
-# Nova 2 Lite es multimodal (acepta imágenes), pero la Knowledge Base
-# (retrieve_and_generate) NO acepta imágenes en su "input": solo texto. Por
-# eso, cuando el usuario adjunta una imagen, se usa un flujo aparte que llama
-# directamente a bedrock_runtime.converse() con la imagen + el prompt del
-# profesor (ver analizar_imagen), en vez del flujo normal de
-# retrieve_and_generate. Si además el usuario escribió texto, se intenta
-# reforzar la respuesta con un retrieve() de apoyo (ver obtener_contexto_kb).
 FORMATOS_IMAGEN_PERMITIDOS = ["png", "jpg", "jpeg", "webp"]
 
 # Límite conservador de tamaño por imagen (MB) para evitar el error de
@@ -193,10 +97,9 @@ _EXT_A_FORMATO_BEDROCK = {
 # Configuración para adjuntar archivos PDF (exámenes, estados
 # financieros, guías, etc.)
 # =========================================================
-# Igual que con las imágenes, retrieve_and_generate no acepta documentos, así
-# que un PDF adjunto también se procesa con bedrock_runtime.converse(), pero
-# usando un bloque "document" (Nova 2 Lite puede leer el PDF directamente,
-# sin necesidad de extraer el texto primero) en vez de un bloque "image".
+# Un PDF adjunto se procesa con bedrock_runtime.converse(), usando un
+# bloque "document" (Nova Pro puede leer el PDF directamente, texto, tablas
+# y su maquetación, sin necesidad de extraer el texto primero).
 FORMATOS_PDF_PERMITIDOS = ["pdf"]
 
 # Límite conservador de tamaño por PDF (MB). Bedrock Converse admite
@@ -266,35 +169,20 @@ with col_centro:
     st.image("logo.png", use_container_width=True)
 st.markdown("<p class='subtitulo' style='text-align:center;'>Profesor y asistente de la plataforma</p>", unsafe_allow_html=True)
 
-with st.sidebar:
-    st.markdown("### ⚙️ Opciones")
-    modo_diagnostico = st.checkbox(
-        "🔧 Modo diagnóstico",
-        value=False,
-        help=(
-            "Muestra, para cada pregunta, los fragmentos crudos que devuelve la "
-            "Knowledge Base (retrieve) con su score de similitud, antes de que el "
-            "modelo genere la respuesta. Útil para verificar si tus documentos de "
-            "S3 realmente se están recuperando."
-        ),
-    )
-
 # =========================================================
-# 3. CLIENTES DE AWS BEDROCK
+# 3. CLIENTE DE AWS BEDROCK
 # =========================================================
-# - bedrock-agent-runtime: para consultar la Knowledge Base (retrieve(), sin generación)
-# - bedrock-runtime: para generar la respuesta final (converse()) y para la
-#   clasificación rápida de tema (sin KB, más barata)
+# Un único cliente bedrock-runtime: se usa tanto para generar la respuesta
+# final (converse() con Nova Pro) como para la clasificación rápida de tema
+# (converse() con Nova Micro).
 @st.cache_resource(show_spinner=False)
-def obtener_clientes_bedrock():
+def obtener_cliente_bedrock():
     session = boto3.Session(region_name=AWS_REGION)
-    agent_client = session.client(service_name="bedrock-agent-runtime")
-    runtime_client = session.client(service_name="bedrock-runtime")
-    return agent_client, runtime_client
+    return session.client(service_name="bedrock-runtime")
 
 
 try:
-    bedrock_agent, bedrock_runtime = obtener_clientes_bedrock()
+    bedrock_runtime = obtener_cliente_bedrock()
 except Exception as e:
     st.error(f"❌ No se pudo inicializar la conexión con AWS Bedrock: {e}")
     st.stop()
@@ -307,10 +195,9 @@ if "messages" not in st.session_state:
         {
             "role": "assistant",
             "content": (
-                "¡Hola! Soy el profesor y asistente contable dentro de la plataforma de la "
-                "Universidad Redcontable. Puedo ayudarte con contabilidad, finanzas, costos, "
-                "y también a ubicar cursos dentro de la malla curricular (plan de estudios) "
-                "de la plataforma. ¿En qué te ayudo?"
+                "¡Hola! Soy el profesor y asistente contable de la Universidad "
+                "Redcontable. Puedo ayudarte con contabilidad, finanzas y "
+                "costos. ¿En qué te ayudo?"
             ),
         }
     ]
@@ -332,7 +219,7 @@ for message in st.session_state.messages:
 # =========================================================
 # 5. CLASIFICACIÓN DE TEMA (paso 1) — filtro híbrido
 # =========================================================
-# Se hace ANTES de tocar la Knowledge Base, para no pedirle a Nova Micro que
+# Se hace ANTES de generar la respuesta, para no pedirle a Nova Pro que
 # decida "¿respondo o rechazo?" al mismo tiempo que genera la respuesta.
 #
 # Es un filtro en DOS capas:
@@ -352,18 +239,12 @@ PALABRAS_CLAVE_TEMA = [
     "depreciaci", "amortizaci", "inventario", "existencia",
     "cuenta por cobrar", "cuenta por pagar", "flujo de caja", "flujo de efectivo",
     "rentabilidad", "utilidad", "ingreso", "gasto", "egreso",
-    "malla curricular", "curso", "universidad redcontable", "redcontable",
-    # Ampliación: más términos técnicos y variantes comunes, para que la
-    # capa 1 (gratis, instantánea) resuelva más casos y se llame menos
-    # seguido al respaldo con Nova Micro (capa 2, que sí cuesta).
     "peps", "ueps", "fifo", "lifo", "promedio ponderado",
     "estado de resultado", "estado de situación", "flujo efectivo",
     "capital de trabajo", "punto de equilibrio", "margen",
     "ratio financ", "razon financ", "razón financ", "apalanca",
     "cxc", "cxp", "roe", "roi", "ebitda", "van", "tir",
     "declaraci\u00f3n de renta", "declaracion de renta", "sunat", "sat ",
-    "asignatura", "materia", "semestre", "pensum", "plan de estudio",
-    "profesor", "docente", "syllabus", "silabo", "sílabo",
 ]
 
 
@@ -389,9 +270,8 @@ def es_pregunta_del_tema(pregunta: str) -> bool:
                             "text": (
                                 "Responde ÚNICAMENTE con la palabra SI o NO, sin explicaciones "
                                 "ni puntuación adicional. ¿La siguiente pregunta trata sobre "
-                                "contabilidad, finanzas, costos, normas contables (como NIC o "
-                                "NIIF), cursos académicos o la malla curricular de una "
-                                "universidad?\n\n"
+                                "contabilidad, finanzas, costos o normas contables (como NIC o "
+                                "NIIF)?\n\n"
                                 f'Pregunta: "{pregunta}"'
                             )
                         }
@@ -409,71 +289,23 @@ def es_pregunta_del_tema(pregunta: str) -> bool:
 
 
 # =========================================================
-# 5.b DETECCIÓN DE PREGUNTAS SOBRE LA MALLA CURRICULAR / PLATAFORMA
-# =========================================================
-# Si el usuario pregunta por cursos, asignaturas, semestres, "la malla" o
-# "la plataforma/página" (refiriéndose a este mismo sitio), reforzamos la
-# búsqueda en la Knowledge Base para que priorice el documento oficial de
-# la malla curricular (ARCHIVO_MALLA_CURRICULAR) en vez de dejar que el
-# buscador semántico se confunda con otros documentos financieros que
-# también mencionan la palabra "costos" (p. ej. categorías de gastos).
-PALABRAS_CLAVE_MALLA = [
-    "malla", "curso", "cursos", "asignatura", "materia", "materias",
-    "plan de estudio", "pensum", "semestre", "plataforma", "pagina",
-    "página", "sitio web",
-]
-
-
-def es_pregunta_de_malla(pregunta: str) -> bool:
-    texto = pregunta.lower()
-    return any(palabra in texto for palabra in PALABRAS_CLAVE_MALLA)
-
-
-# =========================================================
 # 6. PROMPT DEL "PROFESOR" (paso 2 — solo para preguntas ya validadas)
 # =========================================================
 PROMPT_PROFESOR = (
-    "Eres un profesor y asistente académico que funciona INTEGRADO DENTRO de la plataforma "
-    "oficial de la Universidad Redcontable (la misma plataforma donde están alojados todos "
-    "los cursos de la malla curricular). Cuando el usuario mencione 'la plataforma', 'la "
-    "página' o 'el sitio', se está refiriendo a este mismo lugar donde tú, el asistente, "
-    "estás disponible; nunca respondas como si estuvieras fuera de ella o no supieras en qué "
-    "sitio te encuentras. Estás especializado en contabilidad, finanzas, costos y la malla "
-    "curricular (plan de estudios) de la institución. "
+    "Eres un profesor y asistente académico de la Universidad Redcontable, "
+    "especializado en contabilidad, finanzas y costos. "
     "La pregunta del usuario YA fue validada como perteneciente a este tema, así que SIEMPRE "
     "debes responderla; nunca digas que no puedes ayudar ni uses frases de rechazo. "
     "REGLAS:\n"
-    "1. La fuente principal y prioritaria es el contexto de documentos oficiales recuperados "
-    "de la Knowledge Base (S3). Si el contexto contiene la respuesta, básate en él.\n"
-    "2. Si preguntan por cursos, asignaturas, materias, semestres o 'la malla', la respuesta "
-    "correcta debe salir del documento oficial de la malla curricular (su nombre de archivo "
-    "contiene 'MALLA_CURRICULAR'), que lista los cursos organizados por código (por ejemplo "
-    "NIE-2.b.ii-001), nombre y semestre/nivel. NO confundas esos cursos con categorías "
-    "contables de costos y gastos (como 'mantenimiento', 'formación y educación' o "
-    "'reparación') que puedan aparecer en otros documentos financieros de ejemplo: esas "
-    "categorías NO son cursos de la malla.\n"
-    "3. Si el contexto NO contiene la respuesta exacta, respóndela igualmente usando tu "
-    "conocimiento profesional de contabilidad, finanzas o costos, y aclara brevemente que esa "
-    "parte de la respuesta no proviene de un documento oficial cargado en el sistema.\n"
-    "4. Mantente siempre dentro del ámbito de contabilidad, finanzas, costos y la vida académica "
-    "de la Universidad Redcontable; no derives la conversación hacia otros temas.\n"
-    "5. NUNCA menciones dentro del texto de tu respuesta el nombre de ningún archivo, documento "
-    "o su extensión (por ejemplo, no digas cosas como 'según el documento X.pdf' o 'te lo diré "
-    "según el archivo tal'). Responde el contenido de forma natural, como si tú ya supieras la "
-    "información; la fuente se muestra aparte, debajo de tu respuesta, así que no hace falta que "
-    "la nombres.\n"
-    "6. PRECISIÓN TÉCNICA (muy importante en preguntas sobre normas contables como NIC/NIIF/IFRS): "
+    "1. Mantente siempre dentro del ámbito de contabilidad, finanzas y costos; no derives la "
+    "conversación hacia otros temas.\n"
+    "2. PRECISIÓN TÉCNICA (muy importante en preguntas sobre normas contables como NIC/NIIF/IFRS): "
     "nunca trates dos métodos, términos o conceptos distintos como si fueran sinónimos (por "
     "ejemplo, PEPS/FIFO y costo promedio ponderado son DOS métodos diferentes, no lo mismo; "
     "identificación específica es un tercer método distinto a ambos). Antes de responder, "
     "verifica internamente que cada término técnico que uses corresponda exactamente a su "
-    "definición según la norma, y que tu conclusión no se contradiga con tu propia explicación. "
-    "Si el contexto recuperado de los documentos oficiales contiene el artículo o párrafo exacto "
-    "de la norma que responde la pregunta, apégate a esa redacción y a su lógica en vez de "
-    "generalizar o mezclar conceptos de memoria. Si tienes dudas sobre cuál método o concepto "
-    "aplica, prioriza SIEMPRE lo que dice el contexto oficial recuperado por encima de tu propio "
-    "conocimiento general.\n"
-    "7. CASOS QUE SUELES CONFUNDIR — ten especial cuidado con estos, son errores comunes que "
+    "definición según la norma, y que tu conclusión no se contradiga con tu propia explicación.\n"
+    "3. CASOS QUE SUELES CONFUNDIR — ten especial cuidado con estos, son errores comunes que "
     "DEBES evitar:\n"
     "   - NIC 2 (Inventarios): cuando los productos NO son habitualmente intercambiables entre "
     "sí (o son bienes/servicios producidos para un proyecto específico), el método correcto es "
@@ -540,25 +372,16 @@ PROMPT_PROFESOR = (
     "identificados que son 'materiales y generalizados' (es decir, ya hay evidencia suficiente "
     "obtenida), la respuesta correcta es SIEMPRE opinión adversa/desfavorable — la abstención de "
     "opinión es por falta de evidencia suficiente, nunca por la sola magnitud del error.\n"
-    "8. Nunca agregues al final de tu respuesta una línea tipo 'Fuente:', 'Fuentes:' o similar, "
-    "ni ningún resumen de dónde salió la información. La aplicación ya agrega automáticamente el "
-    "bloque de fuente debajo de tu respuesta; si tú agregas tu propia línea de fuente, queda "
-    "duplicado y puede contradecir al bloque real. Simplemente termina tu respuesta con el "
-    "último punto de contenido, sin ninguna nota de cierre sobre el origen de la información.\n"
-    "9. SIEMPRE que tu respuesta se apoye en una norma técnica (NIC, NIIF, NIA, US GAAP/ASC, "
+    "4. SIEMPRE que tu respuesta se apoye en una norma técnica (NIC, NIIF, NIA, US GAAP/ASC, "
     "COSO, etc.), menciona explícitamente dentro del texto el nombre y número de esa norma como "
     "parte natural de la explicación (por ejemplo: 'según la NIC 16, párrafo 39...' o 'conforme "
-    "al párrafo 31 de la NIIF 15...'), incluso si el usuario no lo pide explícitamente. Esto es "
-    "DISTINTO de la regla 5 (que prohíbe nombrar archivos o documentos de la Knowledge Base) y de "
-    "la regla 8 (que prohíbe la línea final de 'Fuente:'): aquí se trata de citar la NORMA "
-    "CONTABLE/DE AUDITORÍA en sí —su nombre y, si lo sabes con certeza, su número de párrafo o "
-    "sección—, no un archivo ni una nota de cierre. Si conoces el número de norma pero no estás "
-    "seguro del párrafo exacto, menciona solo el nombre de la norma (ej. 'según la NIC 16...') "
-    "sin inventar un número de párrafo o sección; citar un número incorrecto es peor que no "
-    "citar ninguno. Nunca mezcles la numeración de un cuerpo normativo con la de otro (por "
-    "ejemplo, NIC/NIIF completas tienen numeración distinta a la NIIF para PYMES, y US GAAP usa "
-    "códigos ASC en vez de números de NIC/NIIF).\n"
-    "10. FORMATO Y LEGIBILIDAD (tu respuesta se muestra como markdown, así que estos elementos sí "
+    "al párrafo 31 de la NIIF 15...'), incluso si el usuario no lo pide explícitamente. Si conoces "
+    "el número de norma pero no estás seguro del párrafo exacto, menciona solo el nombre de la "
+    "norma (ej. 'según la NIC 16...') sin inventar un número de párrafo o sección; citar un "
+    "número incorrecto es peor que no citar ninguno. Nunca mezcles la numeración de un cuerpo "
+    "normativo con la de otro (por ejemplo, NIC/NIIF completas tienen numeración distinta a la "
+    "NIIF para PYMES, y US GAAP usa códigos ASC en vez de números de NIC/NIIF).\n"
+    "5. FORMATO Y LEGIBILIDAD (tu respuesta se muestra como markdown, así que estos elementos sí "
     "se renderizan visualmente):\n"
     "   - Resalta en **negrita** (usando doble asterisco) los 2-4 elementos más importantes de tu "
     "respuesta: el término técnico clave, la conclusión principal, o el nombre de la norma que la "
@@ -575,15 +398,14 @@ PROMPT_PROFESOR = (
     "seguidos dentro de una sola oración larga. Ejemplo de qué hacer: presentarlos como una lista "
     "corta, cada uno en su propia línea con viñeta, y una frase de cierre aparte con la "
     "conclusión.\n"
-    "11. ASIENTOS CONTABLES Y CUADROS DE PARTIDA DOBLE (Debe/Haber) — cuando debas mostrar un "
+    "6. ASIENTOS CONTABLES Y CUADROS DE PARTIDA DOBLE (Debe/Haber) — cuando debas mostrar un "
     "asiento contable o un cuadro de partida doble, sigue estas reglas de forma ESTRICTA, sin "
     "excepción:\n"
     "   - NUNCA escribas el código contable de la cuenta (por ejemplo, no escribas "
-    "'5001 Costo de Ventas' ni '0120 Almacén'), aunque el documento fuente de la Knowledge Base "
-    "sí use codificación de cuentas. Escribe ÚNICAMENTE el nombre de la cuenta ('Costo de "
-    "Ventas', 'Almacén', 'Caja', 'Cuentas por Cobrar', 'Ventas', etc.), nunca el código numérico "
-    "que la precede. El código de cuenta pertenece al plan de cuentas interno de cada empresa "
-    "(varía de una a otra) y no aporta nada a la explicación pedagógica; solo genera confusión.\n"
+    "'5001 Costo de Ventas' ni '0120 Almacén'). Escribe ÚNICAMENTE el nombre de la cuenta ('Costo "
+    "de Ventas', 'Almacén', 'Caja', 'Cuentas por Cobrar', 'Ventas', etc.), nunca un código "
+    "numérico. El código de cuenta pertenece al plan de cuentas interno de cada empresa (varía de "
+    "una a otra) y no aporta nada a la explicación pedagógica; solo genera confusión.\n"
     "   - Presenta el asiento como una tabla markdown con exactamente estas columnas: 'Cuenta', "
     "'Debe (US$)' y 'Haber (US$)' (ajusta la moneda si el ejercicio usa otra).\n"
     "   - Antes de escribir la tabla, calcula mentalmente (paso a paso, con cuidado) el monto "
@@ -618,46 +440,12 @@ def escapar_signos_dolar(texto: str) -> str:
     return texto.replace("$", r"\$")
 
 
-def limpiar_marcadores_citas(texto: str) -> str:
-    """
-    Amazon Nova a veces incrusta marcadores de citas en bruto dentro del
-    texto generado, con el formato %[1]%, %[2]%, etc. En vez de borrarlos
-    (lo que puede dejar huecos raros en la oración, ej. "los documentos
-    oficiales , y , la actividad..."), los convertimos en referencias
-    legibles tipo [1], [2], que igual funcionan como citas visuales sin
-    romper la gramática del texto.
-    """
-    texto_limpio = re.sub(r"%\[(\d+)\]%", r"[\1]", texto)
-    texto_limpio = re.sub(r" {2,}", " ", texto_limpio)
-    return texto_limpio.strip()
-
-
-# Patrón para detectar una línea final del tipo "Fuente: ..." o
-# "Fuentes: ..." que el modelo agregue por su cuenta, a pesar de la regla 8
-# del PROMPT_PROFESOR. Se aplica solo como red de seguridad (defensa en
-# profundidad): un modelo económico como Nova Lite no siempre obedece el
-# 100% de las instrucciones, y esta línea duplicaría o contradiría el
-# bloque de fuente real que agrega formatear_fuentes().
-_PATRON_FUENTE_PROPIA = re.compile(
-    r"\n{1,2}\**Fuente(?:s)?\**\s*:.*\Z",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def quitar_nota_de_fuente_propia(texto: str) -> str:
-    """Elimina, si existe, una línea final tipo 'Fuente: ...' generada por
-    el modelo, para que no choque con el bloque de fuente que agrega la
-    aplicación (formatear_fuentes)."""
-    return _PATRON_FUENTE_PROPIA.sub("", texto).rstrip()
-
-
 # Cuántos intercambios anteriores (pregunta del usuario + respuesta del bot)
 # se le pasan al modelo como "memoria" de la conversación en cada llamada.
 # Ese historial vive ÚNICAMENTE en st.session_state (ver
 # construir_historial_bedrock): si el usuario cierra o recarga la pestaña,
 # st.session_state se reinicia y el historial desaparece por completo. Nunca
-# se guarda en disco, en la Knowledge Base ni en ningún otro lugar
-# persistente.
+# se guarda en disco ni en ningún otro lugar persistente.
 MAX_TURNOS_HISTORIAL = 6
 
 
@@ -670,10 +458,10 @@ def construir_historial_bedrock(max_turnos: int = MAX_TURNOS_HISTORIAL) -> list:
 
     Se excluye el último elemento de st.session_state.messages porque
     corresponde a la pregunta actual, que cada función de generación arma
-    por separado (con su propio contexto de la Knowledge Base o su archivo
-    adjunto). Si un turno anterior tuvo un archivo adjunto, no se reenvían
-    sus bytes (sería pesado y costoso repetirlo en cada turno siguiente):
-    en su lugar se deja una nota de texto indicando que hubo un adjunto.
+    por separado. Si un turno anterior tuvo un archivo adjunto, no se
+    reenvían sus bytes (sería pesado y costoso repetirlo en cada turno
+    siguiente): en su lugar se deja una nota de texto indicando que hubo un
+    adjunto.
 
     Bedrock Converse exige que la conversación empiece en "user" y que los
     roles alternen estrictamente entre "user" y "assistant"; los mensajes
@@ -705,172 +493,26 @@ def construir_historial_bedrock(max_turnos: int = MAX_TURNOS_HISTORIAL) -> list:
     return mensajes
 
 
-def obtener_contexto_kb(pregunta: str, priorizar_malla: bool = False, max_fragmentos: int = 4):
+def generar_respuesta_final(pregunta: str) -> str:
     """
-    Hace un retrieve() (SIN generación) sobre la Knowledge Base y devuelve
-    (texto_contexto, lista_de_fuentes). La respuesta final SIEMPRE se genera
-    aparte con bedrock_runtime.converse() (ver generar_respuesta_final y
-    analizar_imagen), tanto para preguntas de solo texto como para imágenes o
-    PDF adjuntos: así el mismo mecanismo de memoria de conversación
-    (construir_historial_bedrock) funciona igual en ambos casos, algo que
-    retrieve_and_generate no permitía controlar manualmente.
-
-    Si priorizar_malla es True (la pregunta trata sobre cursos, asignaturas,
-    semestres, "la malla" o "la plataforma/página"), se refuerza la consulta
-    semántica y se intenta primero con un filtro de metadata que apunta
-    directamente al documento de la malla curricular. Si ese filtro falla
-    (por ejemplo, porque el almacén vectorial configurado no soporta
-    filtrado por metadata), se reintenta sin filtro.
-
-    Si falla o no hay resultados, devuelve ("", []) sin romper el flujo.
-    """
-    if not pregunta:
-        return "", []
-
-    pregunta_para_kb = pregunta
-    if priorizar_malla:
-        pregunta_para_kb = (
-            f"{pregunta} (busca en la malla curricular / plan de estudios de la "
-            f"Universidad Redcontable, documento {ARCHIVO_MALLA_CURRICULAR}, que lista "
-            "los cursos por código, nombre y semestre)"
-        )
-
-    def _retrieve(con_filtro_malla: bool):
-        config = {"numberOfResults": max_fragmentos}
-        if con_filtro_malla:
-            config["filter"] = {
-                "stringContains": {
-                    "key": "x-amz-bedrock-kb-source-uri",
-                    "value": "MALLA_CURRICULAR",
-                }
-            }
-        return bedrock_agent.retrieve(
-            knowledgeBaseId=KB_ID,
-            retrievalQuery={"text": pregunta_para_kb},
-            retrievalConfiguration={"vectorSearchConfiguration": config},
-        )
-
-    try:
-        if priorizar_malla:
-            try:
-                resp = _retrieve(con_filtro_malla=True)
-            except Exception:
-                # El filtro de metadata no está soportado por esta Knowledge
-                # Base (o el campo no existe en el índice); reintentamos sin
-                # filtro.
-                resp = _retrieve(con_filtro_malla=False)
-        else:
-            resp = _retrieve(con_filtro_malla=False)
-    except Exception:
-        return "", []
-
-    fragmentos = []
-    fuentes = []
-    for r in resp.get("retrievalResults", []):
-        texto = r.get("content", {}).get("text", "")
-        if not texto:
-            continue
-        fragmentos.append(texto)
-
-        s3_uri = r.get("location", {}).get("s3Location", {}).get("uri", "")
-        if s3_uri:
-            nombre_archivo = urllib.parse.unquote(s3_uri.split("/")[-1])
-            if nombre_archivo not in [f["nombre"] for f in fuentes]:
-                fuentes.append({"nombre": nombre_archivo, "fragmento": texto[:150].strip()})
-
-    return "\n\n".join(fragmentos), fuentes
-
-
-def generar_respuesta_final(pregunta: str, contexto_kb: str) -> str:
-    """
-    Genera la respuesta final del profesor con bedrock_runtime.converse(),
-    agregando el HISTORIAL de la conversación de la sesión actual (ver
-    construir_historial_bedrock) para que el bot recuerde preguntas y
+    Genera la respuesta final del profesor con bedrock_runtime.converse()
+    (Nova Pro, sin ningún contexto externo: solo el conocimiento del
+    modelo), agregando el HISTORIAL de la conversación de la sesión actual
+    (ver construir_historial_bedrock) para que el bot recuerde preguntas y
     respuestas anteriores dentro de la misma sesión de Streamlit.
-
-    NOTA: MODEL_ARN_GENERACION apunta a Nova Pro v1, que no soporta
-    "extended thinking" (a diferencia de Nova 2 Lite/Nova 2 Pro), así que
-    aquí NO se envía additionalModelRequestFields con reasoningConfig (ver
-    la nota completa junto a MODEL_ARN_GENERACION más arriba).
     """
-    texto_usuario = pregunta.strip()
-    if contexto_kb:
-        texto_usuario += (
-            "\n\nContexto de los documentos oficiales (puede o no ser "
-            f"relevante):\n{contexto_kb}"
-        )
-
     mensajes = construir_historial_bedrock() + [
-        {"role": "user", "content": [{"text": texto_usuario}]}
+        {"role": "user", "content": [{"text": pregunta.strip()}]}
     ]
 
-    parametros_converse = {
-        "modelId": MODEL_ARN_GENERACION,
-        "system": [{"text": PROMPT_PROFESOR}],
-        "messages": mensajes,
-        "inferenceConfig": {"maxTokens": 4000, "temperature": 0.0},
-    }
-
-    response = bedrock_runtime.converse(**parametros_converse)
+    response = bedrock_runtime.converse(
+        modelId=MODEL_ARN_GENERACION,
+        system=[{"text": PROMPT_PROFESOR}],
+        messages=mensajes,
+        inferenceConfig={"maxTokens": 4000, "temperature": 0.0},
+    )
     bloques = response.get("output", {}).get("message", {}).get("content", [])
-    texto_respuesta = "".join(b.get("text", "") for b in bloques).strip()
-    texto_respuesta = limpiar_marcadores_citas(texto_respuesta)
-    texto_respuesta = quitar_nota_de_fuente_propia(texto_respuesta)
-    return texto_respuesta
-
-
-def consultar_knowledge_base(pregunta: str, priorizar_malla: bool = False):
-    """
-    Punto de entrada del flujo normal de solo texto: recupera contexto de la
-    Knowledge Base (obtener_contexto_kb) y genera la respuesta final ya con
-    memoria de la conversación (generar_respuesta_final). Devuelve
-    (texto_respuesta, lista_de_fuentes).
-    """
-    contexto_kb, fuentes = obtener_contexto_kb(
-        pregunta, priorizar_malla=priorizar_malla, max_fragmentos=6
-    )
-    texto_respuesta = generar_respuesta_final(pregunta, contexto_kb)
-    return texto_respuesta, fuentes
-
-
-def formatear_fuentes(fuentes: list) -> str:
-    """Devuelve el bloque markdown con la fuente principal y el contador de extras."""
-    if not fuentes:
-        return ""
-    principal = fuentes[0]
-    extras = len(fuentes) - 1
-
-    etiqueta = (
-        "📚 **Malla curricular oficial:**"
-        if "MALLA_CURRICULAR" in principal["nombre"].upper()
-        else "📌 **Fuente principal utilizada:**"
-    )
-    bloque = f"\n\n---\n{etiqueta} `{principal['nombre']}`"
-    if extras > 0:
-        plural = "s" if extras > 1 else ""
-        bloque += f" `(+{extras} archivo{plural} más leído{plural})`"
-    bloque += f"\n> *\"{principal['fragmento']}...\"*"
-    return bloque
-
-
-def nota_conocimiento_general() -> str:
-    """
-    Bloque markdown que se muestra cuando la Knowledge Base (S3) NO devolvió
-    ninguna fuente relevante para la pregunta, y la respuesta se generó con
-    el conocimiento profesional general del modelo (ver la regla 3 de
-    PROMPT_PROFESOR: si el contexto no tiene la respuesta exacta, igual se
-    responde aclarando que esa parte no viene de un documento oficial).
-
-    Reemplaza al mensaje anterior ("Se utilizaron diversas fuentes
-    documentadas para esta consulta"), que era engañoso: afirmaba justo lo
-    contrario de lo que había pasado en ese caso (cero fuentes encontradas).
-    """
-    return (
-        "\n\n---\n_ℹ️ No se encontró un documento oficial exacto para esta "
-        "consulta entre los archivos cargados en el sistema; esta respuesta "
-        "se elaboró con conocimiento profesional general de contabilidad, "
-        "finanzas o costos._"
-    )
+    return "".join(b.get("text", "") for b in bloques).strip()
 
 
 def formato_imagen_bedrock(nombre_archivo: str) -> str:
@@ -904,9 +546,9 @@ def construir_bloque_adjunto(archivo) -> dict:
     """
     Arma el bloque de contenido de Bedrock Converse correspondiente al
     archivo adjuntado en el chat: un bloque 'document' con format='pdf' si es
-    un PDF, o un bloque 'image' (como antes) si es una imagen. Nova 2 Lite
-    puede leer el PDF directamente (texto, tablas y su maquetación) sin
-    necesidad de extraer el texto manualmente antes de enviarlo.
+    un PDF, o un bloque 'image' si es una imagen. Nova Pro puede leer el PDF
+    directamente (texto, tablas y su maquetación) sin necesidad de extraer
+    el texto manualmente antes de enviarlo.
     """
     archivo_bytes = archivo.getvalue()
     if es_pdf(archivo):
@@ -926,36 +568,28 @@ def construir_bloque_adjunto(archivo) -> dict:
 
 
 # Instrucción adicional que se agrega a PROMPT_PROFESOR únicamente cuando la
-# consulta incluye una imagen (recibo, balance, ejercicio, captura de la
-# plataforma, etc.).
+# consulta incluye una imagen (recibo, balance, ejercicio, captura, etc.).
 PROMPT_PROFESOR_IMAGEN_EXTRA = (
     "\n\nADEMÁS, en este caso el usuario adjuntó una IMAGEN o un ARCHIVO PDF "
     "(foto o captura de un recibo, estado financiero, ejercicio de "
-    "contabilidad, de la plataforma; o un PDF con un examen, guía, estado "
-    "financiero, etc.). Analiza el contenido con cuidado y responde sobre él "
-    "aplicando tus conocimientos de contabilidad, finanzas y costos, igual "
-    "que harías con una pregunta de texto sobre el mismo tema. Si el "
-    "contenido adjunto NO tiene ninguna relación con contabilidad, finanzas, "
-    "costos o la vida académica de la universidad, responde EXACTA y "
-    f'ÚNICAMENTE con este mensaje, sin nada más: "{MENSAJE_RECHAZO}"'
+    "contabilidad; o un PDF con un examen, guía, estado financiero, etc.). "
+    "Analiza el contenido con cuidado y responde sobre él aplicando tus "
+    "conocimientos de contabilidad, finanzas y costos, igual que harías con "
+    "una pregunta de texto sobre el mismo tema. Si el contenido adjunto NO "
+    "tiene ninguna relación con contabilidad, finanzas o costos, responde "
+    f'EXACTA y ÚNICAMENTE con este mensaje, sin nada más: "{MENSAJE_RECHAZO}"'
 )
 
 
-def analizar_imagen(pregunta: str, archivo, contexto_kb: str = "") -> str:
+def analizar_imagen(pregunta: str, archivo) -> str:
     """
     Analiza un archivo adjunto (imagen o PDF, con o sin pregunta de texto)
-    usando Nova 2 Lite en modo multimodal, vía bedrock_runtime.converse(). Se
-    usa converse en vez de retrieve_and_generate porque este último no
-    acepta imágenes ni documentos.
+    usando Nova Pro en modo multimodal, vía bedrock_runtime.converse().
 
     También incluye el historial de la conversación de la sesión actual (ver
     construir_historial_bedrock), para que si el usuario adjunta un archivo
     como repregunta de algo que ya preguntó antes en texto (o viceversa), el
     modelo tenga ese contexto.
-
-    Si contexto_kb no está vacío (fragmentos recuperados con
-    obtener_contexto_kb a partir de la pregunta de texto), se agrega como
-    apoyo adicional, sin ser la única fuente para analizar el archivo.
     """
     bloque_archivo = construir_bloque_adjunto(archivo)
     es_documento_pdf = es_pdf(archivo)
@@ -975,11 +609,6 @@ def analizar_imagen(pregunta: str, archivo, contexto_kb: str = "") -> str:
             )
         )
     )
-    if contexto_kb:
-        texto_usuario += (
-            "\n\nContexto adicional de documentos oficiales (puede o no ser "
-            f"relevante para este archivo):\n{contexto_kb}"
-        )
 
     contenido = [
         bloque_archivo,
@@ -991,41 +620,14 @@ def analizar_imagen(pregunta: str, archivo, contexto_kb: str = "") -> str:
     # preguntas y respuestas anteriores, sin reenviar adjuntos previos.
     mensajes = construir_historial_bedrock() + [{"role": "user", "content": contenido}]
 
-    # NOTA: MODEL_ARN_GENERACION apunta a Nova Pro v1, que no soporta
-    # "extended thinking", así que no se envía additionalModelRequestFields
-    # (ver la nota completa junto a MODEL_ARN_GENERACION más arriba).
-    parametros_converse = {
-        "modelId": MODEL_ARN_GENERACION,
-        "system": [{"text": PROMPT_PROFESOR + PROMPT_PROFESOR_IMAGEN_EXTRA}],
-        "messages": mensajes,
-        "inferenceConfig": {"maxTokens": 4000, "temperature": 0.0},
-    }
-
-    response = bedrock_runtime.converse(**parametros_converse)
+    response = bedrock_runtime.converse(
+        modelId=MODEL_ARN_GENERACION,
+        system=[{"text": PROMPT_PROFESOR + PROMPT_PROFESOR_IMAGEN_EXTRA}],
+        messages=mensajes,
+        inferenceConfig={"maxTokens": 4000, "temperature": 0.0},
+    )
     bloques = response.get("output", {}).get("message", {}).get("content", [])
-    texto_respuesta = "".join(b.get("text", "") for b in bloques).strip()
-
-    texto_respuesta = limpiar_marcadores_citas(texto_respuesta)
-    texto_respuesta = quitar_nota_de_fuente_propia(texto_respuesta)
-    return texto_respuesta
-
-
-def diagnosticar_retrieve(pregunta: str):
-    """
-    Llama a retrieve() (SIN generación) para inspeccionar directamente qué
-    fragmentos está devolviendo la Knowledge Base para una pregunta dada.
-    Sirve para aislar si un problema es de indexación/sincronización (S3 /
-    Pinecone) en vez de un problema del prompt o del modelo generador.
-    """
-    try:
-        resp = bedrock_agent.retrieve(
-            knowledgeBaseId=KB_ID,
-            retrievalQuery={"text": pregunta},
-            retrievalConfiguration={"vectorSearchConfiguration": {"numberOfResults": 5}},
-        )
-        return resp.get("retrievalResults", []), None
-    except Exception as e:
-        return [], str(e)
+    return "".join(b.get("text", "") for b in bloques).strip()
 
 
 # =========================================================
@@ -1084,31 +686,20 @@ if entrada:
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
             full_response = ""
-            fuentes = []
 
             if archivo_imagen:
-                # ---- Flujo CON imagen o PDF: Nova 2 Lite en modo visión ----
-                # retrieve_and_generate no acepta imágenes ni documentos, así
-                # que aquí no se usa consultar_knowledge_base(): se llama a
-                # analizar_imagen(), que a su vez usa bedrock_runtime.converse().
+                # ---- Flujo CON imagen o PDF: Nova Pro en modo visión ----
                 mensaje_spinner = (
                     "Analizando el PDF..." if archivo_es_pdf else "Analizando la imagen..."
                 )
                 with st.spinner(mensaje_spinner):
                     try:
-                        contexto_kb, fuentes = obtener_contexto_kb(prompt)
-                        full_response = analizar_imagen(prompt, archivo_imagen, contexto_kb)
-
-                        if MENSAJE_RECHAZO.strip() not in full_response:
-                            if fuentes:
-                                full_response += formatear_fuentes(fuentes)
-                            else:
-                                full_response += nota_conocimiento_general()
+                        full_response = analizar_imagen(prompt, archivo_imagen)
                     except Exception as e:
                         etiqueta_error = "el PDF" if archivo_es_pdf else "la imagen"
                         full_response = f"⚠️ Error al analizar {etiqueta_error}: {e}"
             else:
-                # ---- Flujo normal, solo texto (Knowledge Base) ----
+                # ---- Flujo normal, solo texto ----
                 # Paso 1: clasificar tema
                 with st.spinner("Analizando tu consulta..."):
                     pregunta_valida = es_pregunta_del_tema(prompt)
@@ -1117,65 +708,14 @@ if entrada:
                     # Rechazo generado en Python: siempre exacto, nunca mezclado
                     full_response = MENSAJE_RECHAZO
                 else:
-                    # Paso 2: generar respuesta con la Knowledge Base
-                    with st.spinner("Consultando los documentos oficiales..."):
+                    # Paso 2: generar la respuesta con Nova Pro
+                    with st.spinner("Generando la respuesta..."):
                         try:
-                            priorizar_malla = es_pregunta_de_malla(prompt)
-                            full_response, fuentes = consultar_knowledge_base(
-                                prompt, priorizar_malla=priorizar_malla
-                            )
-
-                            # Red de seguridad: si el modelo igual devolviera
-                            # el rechazo, no agregamos fuentes ni notas
-                            # contradictorias.
-                            if MENSAJE_RECHAZO.strip() not in full_response:
-                                if fuentes:
-                                    full_response += formatear_fuentes(fuentes)
-                                else:
-                                    full_response += nota_conocimiento_general()
+                            full_response = generar_respuesta_final(prompt)
                         except Exception as e:
-                            full_response = (
-                                f"⚠️ Error al consultar la Base de Conocimientos: {e}"
-                            )
+                            full_response = f"⚠️ Error al generar la respuesta: {e}"
 
             full_response = escapar_signos_dolar(full_response)
             message_placeholder.markdown(full_response)
-
-            # Mostrar el detalle de archivos adicionales, si los hubo
-            if len(fuentes) > 1:
-                with st.expander("Ver todos los archivos consultados"):
-                    for archivo in fuentes:
-                        st.markdown(f"- `{archivo['nombre']}`")
-
-            # ---- Modo diagnóstico: qué devolvió retrieve() en crudo ----
-            # Solo aplica al flujo de texto puro; con imagen usamos
-            # obtener_contexto_kb() como contexto de apoyo, no como fuente
-            # principal, así que el diagnóstico de retrieve() no aplica igual.
-            if modo_diagnostico and not archivo_imagen:
-                with st.expander("🔧 Diagnóstico: fragmentos recuperados de la Knowledge Base"):
-                    resultados, error = diagnosticar_retrieve(prompt)
-                    if error:
-                        st.error(f"Error al llamar a retrieve(): {error}")
-                    elif not resultados:
-                        st.warning(
-                            "⚠️ retrieve() no devolvió NINGÚN fragmento para esta pregunta. "
-                            "Esto confirma que el problema es de indexación/sincronización "
-                            "(revisa el Sync del Data Source, la ruta en S3, o el índice de "
-                            "Pinecone), no del prompt ni del modelo."
-                        )
-                    else:
-                        st.success(f"Se recuperaron {len(resultados)} fragmento(s).")
-                        for i, r in enumerate(resultados, start=1):
-                            score = r.get("score", "N/A")
-                            uri = (
-                                r.get("location", {})
-                                .get("s3Location", {})
-                                .get("uri", "desconocido")
-                            )
-                            texto = r.get("content", {}).get("text", "")[:200]
-                            st.markdown(
-                                f"**{i}. `{urllib.parse.unquote(uri.split('/')[-1])}`** "
-                                f"(score: `{score}`)\n\n> {texto}..."
-                            )
 
         st.session_state.messages.append({"role": "assistant", "content": full_response})
