@@ -73,7 +73,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.3.5"
+VERSION = "ALPHA 0.3.6"
 
 # MODO DEBUG TEMPORAL: cuando está en True, muestra abajo de cada respuesta
 # de cursos/malla curricular un cuadro con el resultado CRUDO (sin filtrar
@@ -672,16 +672,45 @@ def buscar_en_kb(consulta: str, max_fragmentos: int = 6) -> str:
     if not consulta:
         return "No se encontró ningún archivo relevante para esa búsqueda."
 
-    try:
-        resp = bedrock_agent.retrieve(
-            knowledgeBaseId=KB_ID,
-            retrievalQuery={"text": consulta},
-            retrievalConfiguration={
-                "vectorSearchConfiguration": {"numberOfResults": max_fragmentos}
-            },
-        )
-    except Exception as e:
-        return f"No se pudo consultar la Knowledge Base en este momento ({e})."
+    # Bedrock tiene DOS tipos de Knowledge Base con una API de retrieve()
+    # distinta: las "normales" (vector store propio, como Pinecone u
+    # OpenSearch Serverless "no administrado") usan
+    # "vectorSearchConfiguration", mientras que las "managed" (vector store
+    # totalmente administrado por AWS) exigen "managedSearchConfiguration" y
+    # rechazan la otra con un ValidationException. Como el tipo de Knowledge
+    # Base puede volver a cambiar en el futuro (ya cambió una vez, de
+    # Pinecone a un vector store nativo de Amazon), probamos primero la
+    # config "normal" y, SOLO si el error es específicamente por esta
+    # incompatibilidad de tipo, reintentamos con la otra automáticamente —
+    # así no hay que tocar el código cada vez que cambie el tipo de KB.
+    configuraciones_a_probar = [
+        {"vectorSearchConfiguration": {"numberOfResults": max_fragmentos}},
+        {"managedSearchConfiguration": {"numberOfResults": max_fragmentos}},
+    ]
+
+    resp = None
+    ultimo_error = None
+    for config in configuraciones_a_probar:
+        try:
+            resp = bedrock_agent.retrieve(
+                knowledgeBaseId=KB_ID,
+                retrievalQuery={"text": consulta},
+                retrievalConfiguration=config,
+            )
+            break
+        except Exception as e:
+            ultimo_error = e
+            mensaje_error = str(e)
+            si_es_incompatibilidad_de_tipo = (
+                "vectorSearchConfiguration is not supported" in mensaje_error
+                or "managedSearchConfiguration is not supported" in mensaje_error
+            )
+            if si_es_incompatibilidad_de_tipo:
+                continue
+            return f"No se pudo consultar la Knowledge Base en este momento ({e})."
+
+    if resp is None:
+        return f"No se pudo consultar la Knowledge Base en este momento ({ultimo_error})."
 
     fragmentos = [
         r.get("content", {}).get("text", "")
