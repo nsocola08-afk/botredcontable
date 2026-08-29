@@ -73,7 +73,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.3.2"
+VERSION = "ALPHA 0.3.3"
 
 MENSAJE_RECHAZO = (
     "Lo siento, solo puedo responder preguntas de contabilidad, finanzas, costos, o sobre los "
@@ -520,6 +520,19 @@ PROMPT_PROFESOR = (
     "académico. NUNCA, bajo NINGUNA circunstancia, inventes un nombre de curso, código, "
     "descripción o contenido que no aparezca literalmente en ese resultado — esto es un error "
     "grave que ya ocurrió antes y debes evitarlo siempre.\n"
+    "   RECOMENDACIÓN DE CURSOS — CANTIDAD Y CALIDAD: si el resultado de la búsqueda trae varios "
+    "cursos relacionados, NUNCA los listes todos ni conviertas la respuesta en un listado extenso. "
+    "Elige como máximo 2 o 3 cursos: el que responde de forma más directa y exacta la pregunta del "
+    "usuario, y —solo si de verdad aportan valor— uno o dos cursos previos, siguientes o "
+    "complementarios estrechamente relacionados. Ignora el resto, aunque hayan aparecido en la "
+    "búsqueda. Además, no respondas con la fórmula plana de 'el curso que buscas se llama X y está "
+    "codificado como Y' y nada más: construye una respuesta más completa y natural, como la daría "
+    "un profesor que conoce bien la malla. Para el curso principal, resalta su nombre y código en "
+    "**negrita**, indica en qué semestre o nivel se ubica si el resultado lo menciona, y agrega 1-2 "
+    "frases sobre qué cubre o para qué le sirve al estudiante. Si mencionas cursos adicionales, "
+    "acompaña cada uno de una frase breve de por qué es relevante (nunca los enumeres en seco sin "
+    "explicación). Cierra, si es natural, con una frase corta invitando a preguntar por el "
+    "contenido específico del curso o por otros relacionados.\n"
     "   Fuera de ese caso especial, uses o no la herramienta, responde SIEMPRE de forma "
     "directa y natural, como si tú ya supieras la información de memoria: NUNCA menciones que "
     "usaste una herramienta, que consultaste algo, ni frases como 'según los documentos "
