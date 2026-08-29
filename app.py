@@ -73,7 +73,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.3.7"
+VERSION = "ALPHA 0.3.8"
 
 # MODO DEBUG TEMPORAL: cuando está en True, muestra abajo de cada respuesta
 # de cursos/malla curricular un cuadro con el resultado CRUDO (sin filtrar
@@ -1061,6 +1061,15 @@ if entrada:
             # la pregunta de este turno disparó una búsqueda en la malla.
             if MODO_DEBUG_KB and st.session_state.get("debug_ultima_busqueda_kb") is not None:
                 with st.expander("🔧 Debug temporal: resultado crudo de la Knowledge Base"):
-                    st.code(st.session_state["debug_ultima_busqueda_kb"])
+                    # st.text_area en vez de st.code: el texto se ajusta al
+                    # ancho (word-wrap) en vez de cortarse hacia la derecha,
+                    # así una captura de pantalla se ve completa sin tener
+                    # que hacer scroll horizontal.
+                    st.text_area(
+                        "Resultado crudo (sin filtrar por el prompt):",
+                        value=st.session_state["debug_ultima_busqueda_kb"],
+                        height=300,
+                        disabled=True,
+                    )
 
         st.session_state.messages.append({"role": "assistant", "content": full_response})
