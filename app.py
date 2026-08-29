@@ -73,7 +73,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.3.0"
+VERSION = "ALPHA 0.3.2"
 
 MENSAJE_RECHAZO = (
     "Lo siento, solo puedo responder preguntas de contabilidad, finanzas, costos, o sobre los "
@@ -273,6 +273,50 @@ def contiene_palabra_clave(pregunta: str) -> bool:
     return any(palabra in texto for palabra in PALABRAS_CLAVE_TEMA)
 
 
+# =========================================================
+# 5.b DETECCIÓN DE PREGUNTAS SOBRE CURSOS / MALLA CURRICULAR
+# =========================================================
+# Esto es DISTINTO del tool use de buscar_en_archivos (regla 7 del prompt):
+# ahí se dejaba a discreción del modelo decidir si buscaba o no, pero en la
+# práctica el modelo a veces IGNORA esa instrucción y responde inventando
+# un curso/código/contenido que no existe, en vez de buscar de verdad (esto
+# se confirmó probando el bot: inventó un curso completo con contenido
+# plausible pero falso). Para preguntas de cursos/malla curricular, en vez
+# de confiar en que el modelo use la herramienta, la aplicación hace la
+# búsqueda en S3 DE FORMA OBLIGATORIA antes de generar la respuesta (ver
+# generar_respuesta_final), y le inyecta el resultado real como contexto,
+# con una instrucción explícita de no inventar si ese resultado no trae la
+# respuesta. Así la honestidad no depende de que el modelo "decida" buscar.
+PALABRAS_CLAVE_MALLA = [
+    "malla curricular", "malla", "curso", "cursos", "asignatura", "materia",
+    "materias", "plan de estudio", "pensum", "semestre", "syllabus",
+    "silabo", "sílabo", "universidadredcontable", "universidad redcontable",
+]
+
+
+def es_pregunta_de_malla(pregunta: str) -> bool:
+    texto = pregunta.lower()
+    return any(palabra in texto for palabra in PALABRAS_CLAVE_MALLA)
+
+
+def buscar_en_malla_curricular(pregunta: str) -> str:
+    """
+    Wrapper de buscar_en_kb() para preguntas de cursos/malla curricular:
+    refuerza la consulta semántica aclarando que "curso" siempre se refiere
+    a un curso de la malla curricular / plan de estudios de la plataforma
+    Universidad Redcontable (universidadredcontable) — nunca a otro
+    significado de "curso" (como un tipo de cambio o una divisa) — para que
+    la búsqueda en la Knowledge Base apunte al documento correcto en vez de
+    quedarse en resultados genéricos.
+    """
+    consulta_reforzada = (
+        f"{pregunta} (curso/asignatura de la malla curricular o plan de "
+        "estudios de la plataforma Universidad Redcontable / "
+        "universidadredcontable)"
+    )
+    return buscar_en_kb(consulta_reforzada)
+
+
 def es_pregunta_del_tema(pregunta: str) -> bool:
     # Capa 1: coincidencia rápida y confiable por palabras clave
     if contiene_palabra_clave(pregunta):
@@ -315,12 +359,16 @@ def es_pregunta_del_tema(pregunta: str) -> bool:
 # =========================================================
 PROMPT_PROFESOR = (
     "Eres un profesor y asistente académico que funciona INTEGRADO DENTRO de la plataforma de "
-    "cursos de la Universidad Redcontable. Cuando el usuario mencione 'la plataforma', 'la "
-    "página' o 'el sitio', se está refiriendo a este mismo lugar donde tú, el asistente, estás "
-    "disponible; nunca respondas como si estuvieras fuera de ella o no supieras en qué sitio te "
-    "encuentras. Estás especializado en: (a) contabilidad, finanzas y costos, y (b) los cursos y "
-    "la malla curricular (plan de estudios) de la plataforma — en qué curso, semestre o "
-    "asignatura se ve determinado tema. "
+    "cursos de la Universidad Redcontable (también conocida como 'universidadredcontable'). "
+    "Cuando el usuario mencione 'la plataforma', 'la página', 'el sitio' o 'universidadredcontable', "
+    "se está refiriendo a este mismo lugar donde tú, el asistente, estás disponible; nunca "
+    "respondas como si estuvieras fuera de ella o no supieras en qué sitio te encuentras. Estás "
+    "especializado en: (a) contabilidad, finanzas y costos, y (b) los cursos y la malla curricular "
+    "(plan de estudios) de la plataforma — en qué curso, semestre o asignatura se ve determinado "
+    "tema. IMPORTANTE: cuando el usuario diga 'curso' o 'cursos' SIEMPRE se refiere a un curso de "
+    "la malla curricular / plan de estudios de esta plataforma (Universidad Redcontable / "
+    "universidadredcontable) — nunca a otro significado de la palabra 'curso' (como un tipo de "
+    "cambio o una divisa). "
     "La pregunta del usuario YA fue validada como perteneciente a este tema, así que SIEMPRE "
     "debes responderla; nunca digas que no puedes ayudar ni uses frases de rechazo. "
     "REGLAS:\n"
@@ -458,17 +506,21 @@ PROMPT_PROFESOR = (
     "PRIMERO con tu propio conocimiento profesional de contabilidad, finanzas y costos; usa la "
     "herramienta SOLO cuando: (a) el usuario pida explícitamente algo de 'mis archivos', 'los "
     "documentos' o 'lo que subí'; (b) necesites verificar una cifra, caso o dato específico de la "
-    "institución que no sabes con certeza de memoria; (c) no estás seguro de tu respuesta y existe "
-    "la posibilidad razonable de que haya un documento oficial con la respuesta exacta; o (d) LA "
-    "PREGUNTA ES SOBRE CURSOS, ASIGNATURAS, SEMESTRES O LA MALLA CURRICULAR/PLAN DE ESTUDIOS DE LA "
-    "PLATAFORMA — este caso (d) es DISTINTO a los anteriores: úsala SIEMPRE, sin excepción, "
-    "porque esa información (qué cursos existen, en qué semestre, qué código tienen, en qué curso "
-    "se ve un tema específico) es exclusiva de esta institución y NUNCA la sabes de memoria por tu "
-    "conocimiento general; nunca inventes nombres, códigos o números de curso. Si buscas y no "
-    "encuentras nada relevante sobre la malla curricular, dilo con honestidad en vez de inventar "
-    "un curso que no existe. NO uses la herramienta para preguntas de teoría contable general que "
-    "ya puedes responder bien por tu cuenta (eso gasta tiempo y recursos sin necesidad). Uses o no "
-    "la herramienta, responde SIEMPRE de forma "
+    "institución que no sabes con certeza de memoria; o (c) no estás seguro de tu respuesta y "
+    "existe la posibilidad razonable de que haya un documento oficial con la respuesta exacta. NO "
+    "uses la herramienta para preguntas de teoría contable general que ya puedes responder bien "
+    "por tu cuenta (eso gasta tiempo y recursos sin necesidad).\n"
+    "   CASO ESPECIAL — CURSOS, ASIGNATURAS, SEMESTRES O MALLA CURRICULAR/PLAN DE ESTUDIOS: para "
+    "estas preguntas la aplicación YA hizo la búsqueda por ti de forma automática y te la agregó "
+    "al mensaje del usuario como '[Resultado de la búsqueda en la malla curricular oficial de la "
+    "plataforma:]' — no necesitas (ni debes) usar la herramienta buscar_en_archivos otra vez para "
+    "esto. Tu única tarea es: si ese resultado SÍ menciona el curso/dato exacto, respóndelo con "
+    "esa información; si NO lo menciona, dilo con toda honestidad ('no encontré ese curso "
+    "específico en la malla curricular') y sugiere verificar con la plataforma o el equipo "
+    "académico. NUNCA, bajo NINGUNA circunstancia, inventes un nombre de curso, código, "
+    "descripción o contenido que no aparezca literalmente en ese resultado — esto es un error "
+    "grave que ya ocurrió antes y debes evitarlo siempre.\n"
+    "   Fuera de ese caso especial, uses o no la herramienta, responde SIEMPRE de forma "
     "directa y natural, como si tú ya supieras la información de memoria: NUNCA menciones que "
     "usaste una herramienta, que consultaste algo, ni frases como 'según los documentos "
     "cargados...', 'según los archivos del sistema...', 'consulté la base de datos...' o "
@@ -693,11 +745,33 @@ def generar_respuesta_final(pregunta: str) -> str:
     (Nova Pro), agregando el HISTORIAL de la conversación de la sesión
     actual (ver construir_historial_bedrock) para que el bot recuerde
     preguntas y respuestas anteriores dentro de la misma sesión de
-    Streamlit. El modelo puede, si lo decide, usar la herramienta
-    buscar_en_archivos (ver _llamar_converse_con_herramientas).
+    Streamlit.
+
+    Si la pregunta es sobre cursos/malla curricular (ver
+    es_pregunta_de_malla), se hace la búsqueda en la Knowledge Base de
+    forma OBLIGATORIA aquí mismo, en vez de dejarle esa decisión al modelo:
+    esto evita que invente un curso/código/contenido que no existe cuando
+    decide (por su cuenta) no usar la herramienta buscar_en_archivos. Para
+    cualquier otra pregunta, el modelo sigue teniendo esa herramienta
+    disponible por si la necesita (ver _llamar_converse_con_herramientas).
     """
+    texto_usuario = pregunta.strip()
+
+    if es_pregunta_de_malla(pregunta):
+        resultado_busqueda = buscar_en_malla_curricular(pregunta)
+        texto_usuario += (
+            "\n\n[Resultado de la búsqueda en la malla curricular oficial de la "
+            f"plataforma:]\n{resultado_busqueda}\n\n"
+            "INSTRUCCIÓN CRÍTICA: si el resultado anterior NO menciona explícitamente "
+            "el curso, código o dato que se está preguntando, DEBES decirlo con "
+            "honestidad (por ejemplo: 'no encontré ese curso específico en la malla "
+            "curricular') y sugerir que verifique con la plataforma o el equipo "
+            "académico. NUNCA inventes un nombre de curso, código, descripción o "
+            "contenido que no aparezca literalmente en el resultado de arriba."
+        )
+
     mensajes = construir_historial_bedrock() + [
-        {"role": "user", "content": [{"text": pregunta.strip()}]}
+        {"role": "user", "content": [{"text": texto_usuario}]}
     ]
     return _llamar_converse_con_herramientas(PROMPT_PROFESOR, mensajes)
 
@@ -796,6 +870,20 @@ def analizar_imagen(pregunta: str, archivo) -> str:
             )
         )
     )
+
+    # Igual que en generar_respuesta_final: si la pregunta que acompaña al
+    # adjunto es sobre cursos/malla curricular, se busca en la Knowledge
+    # Base de forma OBLIGATORIA (no se deja a discreción del modelo).
+    if pregunta and es_pregunta_de_malla(pregunta):
+        resultado_busqueda = buscar_en_malla_curricular(pregunta)
+        texto_usuario += (
+            "\n\n[Resultado de la búsqueda en la malla curricular oficial de la "
+            f"plataforma:]\n{resultado_busqueda}\n\n"
+            "INSTRUCCIÓN CRÍTICA: si el resultado anterior NO menciona explícitamente "
+            "el curso, código o dato que se está preguntando, DEBES decirlo con "
+            "honestidad en vez de inventar un curso, código o contenido que no "
+            "aparezca literalmente ahí."
+        )
 
     contenido = [
         bloque_archivo,
