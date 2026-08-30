@@ -44,6 +44,23 @@ import re
 import boto3
 import streamlit as st
 
+# Patrón para eliminar cualquier bloque de "pensamiento" o razonamiento interno
+# que el modelo pudiera dejar escapar en su respuesta (ej. "<thinking>...
+# </thinking>"), como red de seguridad adicional a la regla 8 del
+# PROMPT_PROFESOR. Cubre variantes en español/inglés y, con re.DOTALL, el
+# contenido puede extenderse por varias líneas.
+_PATRON_THINKING = re.compile(
+    r"<\s*(thinking|think|razonamiento|reasoning)\s*>.*?<\s*/\s*\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+# Por si la respuesta se corta y queda una etiqueta de apertura sin su cierre
+# (ej. el modelo alcanzó el límite de tokens en medio del bloque de
+# pensamiento): elimina desde la etiqueta de apertura hasta el final del texto.
+_PATRON_THINKING_SIN_CIERRE = re.compile(
+    r"<\s*(thinking|think|razonamiento|reasoning)\s*>.*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
 # =========================================================
 # 1. CONFIGURACIÓN GENERAL
 # =========================================================
@@ -73,7 +90,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.3.9"
+VERSION = "ALPHA 0.4.0"
 
 # MODO DEBUG TEMPORAL: cuando está en True, muestra abajo de cada respuesta
 # de cursos/malla curricular un cuadro con el resultado CRUDO (sin filtrar
@@ -395,7 +412,14 @@ PROMPT_PROFESOR = (
     "ejemplo, PEPS/FIFO y costo promedio ponderado son DOS métodos diferentes, no lo mismo; "
     "identificación específica es un tercer método distinto a ambos). Antes de responder, "
     "verifica internamente que cada término técnico que uses corresponda exactamente a su "
-    "definición según la norma, y que tu conclusión no se contradiga con tu propia explicación.\n"
+    "definición según la norma, y que tu conclusión no se contradiga con tu propia explicación. "
+    "MARCO NORMATIVO POR DEFECTO: cuando el usuario pregunte por 'NIC', 'NIIF' o 'IFRS' sin "
+    "especificar más, responde SIEMPRE usando las NIIF/NIC COMPLETAS (NIIF plenas), con su "
+    "numeración estándar (NIC 2, NIIF 15, NIC 16, etc.). Usa la NIIF PARA PYMES (con su "
+    "numeración por secciones, ej. 'Sección 13', 'Sección 17') ÚNICAMENTE si el usuario la "
+    "menciona explícitamente en su pregunta (por ejemplo, dice 'NIIF para pymes', 'para pymes' o "
+    "'Sección X'). Nunca mezcles ambas numeraciones en la misma respuesta ni cambies a NIIF para "
+    "pymes por tu cuenta cuando el usuario no la pidió.\n"
     "3. CASOS QUE SUELES CONFUNDIR — ten especial cuidado con estos, son errores comunes que "
     "DEBES evitar:\n"
     "   - NIC 2 (Inventarios): cuando los productos NO son habitualmente intercambiables entre "
@@ -555,7 +579,12 @@ PROMPT_PROFESOR = (
     "cargados...', 'según los archivos del sistema...', 'consulté la base de datos...' o "
     "similares — ni aunque hayas encontrado algo relevante, ni aunque no hayas encontrado nada. "
     "El usuario no debe notar ninguna diferencia entre una respuesta que viene de tu conocimiento "
-    "y una que se apoyó en la herramienta; simplemente responde el contenido."
+    "y una que se apoyó en la herramienta; simplemente responde el contenido.\n"
+    "8. NUNCA muestres tu razonamiento interno, borrador o proceso de pensamiento en la respuesta: "
+    "no escribas etiquetas como '<thinking>', '<think>', '<razonamiento>' ni nada similar, ni "
+    "frases como 'primero voy a...', 'déjame pensar' o 'analizando la pregunta'. Piensa el "
+    "problema para ti mismo sin escribirlo, y entrega ÚNICAMENTE la respuesta final ya elaborada, "
+    "empezando directamente por el contenido que le sirve al usuario."
 )
 
 
@@ -568,6 +597,19 @@ def escapar_signos_dolar(texto: str) -> str:
     Escapamos cada "$" como "\\$" para que Streamlit lo muestre literal.
     """
     return texto.replace("$", r"\$")
+
+
+def limpiar_razonamiento_interno(texto: str) -> str:
+    """
+    Red de seguridad para que nunca se vea en pantalla un bloque de
+    "pensamiento" o razonamiento interno que el modelo haya dejado escapar
+    en el texto de su respuesta (ej. "<thinking>...</thinking>"). La regla 8
+    del PROMPT_PROFESOR ya le pide al modelo que no genere esto, pero esto
+    actúa como respaldo por si el modelo lo hace de todas formas.
+    """
+    texto = _PATRON_THINKING.sub("", texto)
+    texto = _PATRON_THINKING_SIN_CIERRE.sub("", texto)
+    return texto.strip()
 
 
 # Cuántos intercambios anteriores (pregunta del usuario + respuesta del bot)
@@ -1050,6 +1092,7 @@ if entrada:
                         except Exception as e:
                             full_response = f"⚠️ Error al generar la respuesta: {e}"
 
+            full_response = limpiar_razonamiento_interno(full_response)
             full_response = escapar_signos_dolar(full_response)
             message_placeholder.markdown(full_response)
 
