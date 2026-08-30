@@ -676,9 +676,19 @@ def escapar_signos_dolar(texto: str) -> str:
     dentro de st.markdown(). Si la respuesta menciona precios como "$20" y
     más adelante "$24", todo lo que queda entre ambos signos se renderiza
     como una sola ecuación gigante (texto desbordado, en cursiva, pegado).
-    Escapamos cada "$" como "\\$" para que Streamlit lo muestre literal.
+
+    Al principio probamos escapar cada "$" como "\\$", pero en la práctica
+    Streamlit NO oculta la barra invertida al renderizar: el usuario termina
+    viendo literalmente "\$3,659.94" en pantalla (con la barra incluida),
+    un comportamiento conocido de Streamlit (no interpreta "\$" como un
+    escape real de Markdown). Por eso, en vez de escapar el símbolo,
+    reemplazamos cada "$" por "﹩" (U+FE69, "small dollar sign"): es un
+    carácter Unicode distinto que se ve prácticamente igual a un signo de
+    dólar normal, pero que Streamlit no reconoce como el "$" que dispara el
+    modo LaTeX, así que nunca genera ni la fórmula gigante ni ningún
+    carácter de escape visible.
     """
-    return texto.replace("$", r"\$")
+    return texto.replace("$", "﹩")
 
 
 # Cuántos intercambios anteriores (pregunta del usuario + respuesta del bot)
