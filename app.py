@@ -73,7 +73,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.3.9"
+VERSION = "ALPHA 0.3.10"
 
 # MODO DEBUG TEMPORAL: cuando está en True, muestra abajo de cada respuesta
 # de cursos/malla curricular un cuadro con el resultado CRUDO (sin filtrar
@@ -555,8 +555,40 @@ PROMPT_PROFESOR = (
     "cargados...', 'según los archivos del sistema...', 'consulté la base de datos...' o "
     "similares — ni aunque hayas encontrado algo relevante, ni aunque no hayas encontrado nada. "
     "El usuario no debe notar ninguna diferencia entre una respuesta que viene de tu conocimiento "
-    "y una que se apoyó en la herramienta; simplemente responde el contenido."
+    "y una que se apoyó en la herramienta; simplemente responde el contenido.\n"
+    "8. NUNCA muestres tu razonamiento interno ni narres cómo vas a construir la respuesta. Esto "
+    "incluye, sin excepción: bloques como '<thinking>...</thinking>' o similares, frases del tipo "
+    "'el usuario está pidiendo...', 'el usuario pide...', 'voy a calcular...', 'ahora crearé...', "
+    "listas numeradas de pasos que vas a seguir para responder, o cualquier meta-comentario sobre "
+    "tu propio proceso. Todo cálculo, verificación o análisis previo (por ejemplo, el cálculo "
+    "mental de un asiento contable de la regla 6) debe hacerse de forma completamente interna y "
+    "SILENCIOSA: tu respuesta debe empezar DIRECTAMENTE con el contenido final para el usuario "
+    "(la explicación, la tabla del asiento, etc.), sin ningún preámbulo sobre qué vas a hacer o "
+    "cómo lo vas a resolver."
 )
+
+
+# Nova Pro, sobre todo en preguntas que piden calcular algo (como un asiento
+# contable), a veces antepone un bloque de razonamiento interno visible del
+# tipo "<thinking>...</thinking>" antes de la respuesta real, aunque el
+# prompt (ver regla 8 de PROMPT_PROFESOR) le pida explícitamente no hacerlo.
+# Esta expresión regular es una RED DE SEGURIDAD a nivel de código: si ese
+# bloque aparece de todos modos, se elimina antes de mostrarle nada al
+# usuario. re.DOTALL para que ".*?" también capture saltos de línea dentro
+# del bloque.
+_PATRON_BLOQUE_PENSAMIENTO = re.compile(
+    r"<\s*thinking\s*>.*?<\s*/\s*thinking\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def quitar_bloque_pensamiento(texto: str) -> str:
+    """
+    Elimina cualquier bloque "<thinking>...</thinking>" (razonamiento
+    interno que el modelo no debería mostrar) del texto de respuesta, y
+    recorta espacios en blanco sobrantes que puedan quedar al inicio.
+    """
+    return _PATRON_BLOQUE_PENSAMIENTO.sub("", texto).strip()
 
 
 def escapar_signos_dolar(texto: str) -> str:
@@ -777,7 +809,9 @@ def _llamar_converse_con_herramientas(system_prompt: str, mensajes: list) -> str
         bloques = response.get("output", {}).get("message", {}).get("content", [])
 
         if response.get("stopReason") != "tool_use":
-            return "".join(b.get("text", "") for b in bloques).strip()
+            return quitar_bloque_pensamiento(
+                "".join(b.get("text", "") for b in bloques).strip()
+            )
 
         # El modelo pidió usar la herramienta: se agrega su turno (con el
         # bloque toolUse) y se le responde con el resultado de la búsqueda.
@@ -794,7 +828,7 @@ def _llamar_converse_con_herramientas(system_prompt: str, mensajes: list) -> str
         inferenceConfig={"maxTokens": 4000, "temperature": 0.0},
     )
     bloques = response.get("output", {}).get("message", {}).get("content", [])
-    return "".join(b.get("text", "") for b in bloques).strip()
+    return quitar_bloque_pensamiento("".join(b.get("text", "") for b in bloques).strip())
 
 
 def generar_respuesta_final(pregunta: str) -> str:
