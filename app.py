@@ -344,6 +344,48 @@ def buscar_en_malla_curricular(pregunta: str) -> str:
     return buscar_en_kb(consulta_reforzada, max_fragmentos=15)
 
 
+# =========================================================
+# 5.c DETECCIÓN DE PREGUNTAS SOBRE LA NIIF 18
+# =========================================================
+# La NIIF 18 (Presentación e Información a Revelar en los Estados
+# Financieros) es una norma real emitida por el IASB en abril de 2024,
+# vigente para los periodos anuales que comiencen a partir del 1 de enero
+# de 2027 (reemplaza a la NIC 1). Por ser una norma reciente, el modelo
+# tiende a CONFUNDIRLA con la NIC 18 (Ingresos de Actividades Ordinarias),
+# una norma antigua y derogada desde 2018 (reemplazada por la NIIF 15), y
+# termina respondiendo -de forma incorrecta- que "la NIIF 18 no existe" o
+# que "fue reemplazada por la NIIF 15" (eso es cierto de la NIC 18, no de
+# la NIIF 18: son dos normas distintas). Igual que con la malla curricular
+# (ver es_pregunta_de_malla más arriba), no se deja a discreción del
+# modelo decidir si busca o no: la aplicación fuerza la búsqueda en la
+# Knowledge Base (donde sí hay archivos oficiales sobre la NIIF 18) antes
+# de generar la respuesta.
+PALABRAS_CLAVE_NIIF18 = ["niif 18", "niif18", "ifrs 18", "ifrs18"]
+
+
+def es_pregunta_de_niif18(pregunta: str) -> bool:
+    texto = pregunta.lower()
+    return any(palabra in texto for palabra in PALABRAS_CLAVE_NIIF18)
+
+
+def buscar_niif18(pregunta: str) -> str:
+    """
+    Wrapper de buscar_en_kb() para preguntas sobre la NIIF 18: refuerza la
+    consulta semántica aclarando que se trata de la norma NIIF 18
+    (Presentación e Información a Revelar en los Estados Financieros,
+    IASB 2024, vigente desde 2027), y que NO debe confundirse con la NIC 18
+    (norma derogada), para que la búsqueda en la Knowledge Base apunte al
+    documento correcto en vez de quedarse en resultados genéricos o vacíos.
+    """
+    consulta_reforzada = (
+        f"{pregunta} (NIIF 18 / IFRS 18, Presentación e Información a "
+        "Revelar en los Estados Financieros, norma vigente emitida por el "
+        "IASB en 2024; NO es la NIC 18, que es una norma distinta y "
+        "derogada)"
+    )
+    return buscar_en_kb(consulta_reforzada, max_fragmentos=10)
+
+
 def es_pregunta_del_tema(pregunta: str) -> bool:
     # Capa 1: coincidencia rápida y confiable por palabras clave
     if contiene_palabra_clave(pregunta):
@@ -474,6 +516,19 @@ PROMPT_PROFESOR = (
     "identificados que son 'materiales y generalizados' (es decir, ya hay evidencia suficiente "
     "obtenida), la respuesta correcta es SIEMPRE opinión adversa/desfavorable — la abstención de "
     "opinión es por falta de evidencia suficiente, nunca por la sola magnitud del error.\n"
+    "   - NIIF 18 vs. NIC 18 — NO SON LA MISMA NORMA, cuidado con esta confusión: la NIIF 18 "
+    "(Presentación e Información a Revelar en los Estados Financieros) SÍ EXISTE, es una norma "
+    "vigente emitida por el IASB en abril de 2024, aplicable a los periodos anuales que comiencen "
+    "a partir del 1 de enero de 2027, y reemplaza a la NIC 1. Introduce, entre otros cambios, tres "
+    "categorías obligatorias en el estado de resultados (operativa, de inversión y de "
+    "financiamiento), el requisito de presentar 'medidas de rendimiento definidas por la gerencia' "
+    "(MPMs) con su conciliación, y nuevos principios de agregación y desagregación de partidas. La "
+    "NIC 18 (Ingresos de Actividades Ordinarias), en cambio, es una norma DISTINTA y ANTIGUA, "
+    "derogada en 2018 y reemplazada por la NIIF 15 (ver el punto anterior) — pero esa derogación "
+    "es de la NIC 18, no tiene nada que ver con la NIIF 18. NUNCA digas que la NIIF 18 no existe, "
+    "que fue reemplazada por la NIIF 15, o que es lo mismo que la NIC 18: son dos normas "
+    "completamente distintas, sobre temas distintos (presentación de estados financieros vs. "
+    "ingresos), separadas por más de dos décadas de diferencia entre una y otra.\n"
     "4. SIEMPRE que tu respuesta se apoye en una norma técnica (NIC, NIIF, NIA, US GAAP/ASC, "
     "COSO, etc.), menciona explícitamente dentro del texto el nombre y número de esa norma como "
     "parte natural de la explicación (por ejemplo: 'según la NIC 16, párrafo 39...' o 'conforme "
@@ -854,7 +909,10 @@ def generar_respuesta_final(pregunta: str) -> str:
     es_pregunta_de_malla), se hace la búsqueda en la Knowledge Base de
     forma OBLIGATORIA aquí mismo, en vez de dejarle esa decisión al modelo:
     esto evita que invente un curso/código/contenido que no existe cuando
-    decide (por su cuenta) no usar la herramienta buscar_en_archivos. Para
+    decide (por su cuenta) no usar la herramienta buscar_en_archivos. Lo
+    mismo se hace para preguntas sobre la NIIF 18 (ver es_pregunta_de_niif18),
+    ya que el modelo tiende a confundirla con la NIC 18 (derogada) y a
+    responder que no existe en vez de buscar los archivos oficiales. Para
     cualquier otra pregunta, el modelo sigue teniendo esa herramienta
     disponible por si la necesita (ver _llamar_converse_con_herramientas).
     """
@@ -873,6 +931,25 @@ def generar_respuesta_final(pregunta: str) -> str:
             "curricular') y sugerir que verifique con la plataforma o el equipo "
             "académico. NUNCA inventes un nombre de curso, código, descripción o "
             "contenido que no aparezca literalmente en el resultado de arriba."
+        )
+
+    if es_pregunta_de_niif18(pregunta):
+        resultado_busqueda_niif18 = buscar_niif18(pregunta)
+        if MODO_DEBUG_KB:
+            st.session_state["debug_ultima_busqueda_kb"] = resultado_busqueda_niif18
+        texto_usuario += (
+            "\n\n[Resultado de la búsqueda en los archivos oficiales sobre la "
+            f"NIIF 18:]\n{resultado_busqueda_niif18}\n\n"
+            "INSTRUCCIÓN CRÍTICA: la NIIF 18 (Presentación e Información a Revelar "
+            "en los Estados Financieros) SÍ EXISTE: es una norma vigente, emitida "
+            "por el IASB en 2024 y aplicable desde 2027, que reemplaza a la NIC 1. "
+            "Es una norma COMPLETAMENTE DISTINTA a la NIC 18 (Ingresos de "
+            "Actividades Ordinarias), que es la que fue derogada en 2018 y "
+            "reemplazada por la NIIF 15. NUNCA digas que la NIIF 18 no existe, que "
+            "fue reemplazada por la NIIF 15, ni la trates como sinónimo de la NIC "
+            "18. Usa el resultado de la búsqueda de arriba para responder con la "
+            "información oficial de la institución; si ese resultado no trae el "
+            "dato exacto que se pregunta, dilo con honestidad en vez de inventarlo."
         )
 
     mensajes = construir_historial_bedrock() + [
@@ -990,6 +1067,23 @@ def analizar_imagen(pregunta: str, archivo) -> str:
             "el curso, código o dato que se está preguntando, DEBES decirlo con "
             "honestidad en vez de inventar un curso, código o contenido que no "
             "aparezca literalmente ahí."
+        )
+
+    # Igual que arriba: si la pregunta que acompaña al adjunto es sobre la
+    # NIIF 18, se busca en la Knowledge Base de forma OBLIGATORIA (ver
+    # es_pregunta_de_niif18 y buscar_niif18), para que el modelo no la
+    # confunda con la NIC 18 (derogada) y sí use los archivos oficiales.
+    if pregunta and es_pregunta_de_niif18(pregunta):
+        resultado_busqueda_niif18 = buscar_niif18(pregunta)
+        if MODO_DEBUG_KB:
+            st.session_state["debug_ultima_busqueda_kb"] = resultado_busqueda_niif18
+        texto_usuario += (
+            "\n\n[Resultado de la búsqueda en los archivos oficiales sobre la "
+            f"NIIF 18:]\n{resultado_busqueda_niif18}\n\n"
+            "INSTRUCCIÓN CRÍTICA: la NIIF 18 SÍ EXISTE, es una norma vigente "
+            "emitida por el IASB en 2024 (aplicable desde 2027) y es distinta a "
+            "la NIC 18 (derogada, reemplazada por la NIIF 15). Nunca digas que "
+            "la NIIF 18 no existe ni la confundas con la NIC 18."
         )
 
     contenido = [
