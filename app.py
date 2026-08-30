@@ -174,6 +174,12 @@ st.markdown(
         border-radius: 6px;
         z-index: 1000000 !important;
     }}
+    /* Separación extra debajo de la casilla de chat para que no quede
+       pegada al borde inferior del recuadro embebido. */
+    [data-testid="stBottomBlockContainer"],
+    [data-testid="stBottom"] {{
+        padding-bottom: 1.5rem !important;
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -184,7 +190,7 @@ st.markdown(f"<div class='version-esquina'>{VERSION}</div>", unsafe_allow_html=T
 col_izq, col_centro, col_der = st.columns([1, 2, 1])
 with col_centro:
     st.image("logo.png", use_container_width=True)
-st.markdown("<p class='subtitulo' style='text-align:center;'>Profesor y asistente de la plataforma</p>", unsafe_allow_html=True)
+st.markdown("<p class='subtitulo' style='text-align:center;'>La única IA especializada en contabilidad para contadores de Latinoamérica.</p>", unsafe_allow_html=True)
 
 # =========================================================
 # 3. CLIENTES DE AWS BEDROCK
@@ -217,9 +223,14 @@ if "messages" not in st.session_state:
         {
             "role": "assistant",
             "content": (
-                "¡Hola! Soy el profesor y asistente contable de la Universidad "
-                "Redcontable. Puedo ayudarte con contabilidad, finanzas y "
-                "costos. ¿En qué te ayudo?"
+                "Hola, soy la IA PACIOLI, profesor y asistente contable de "
+                "**Universidad** :red[**RED**]**Contable**.\n\n"
+                "Estoy aquí para ayudarte con tus consultas relacionadas con "
+                "contabilidad, finanzas, costos e información sobre nuestra "
+                "plataforma educativa. Asimismo, puedo orientarte utilizando "
+                "las normas contables y financieras aplicables en la "
+                "actualidad.\n\n"
+                "¿En qué puedo ayudarte?"
             ),
         }
     ]
