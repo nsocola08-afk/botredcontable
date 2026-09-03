@@ -73,7 +73,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.4.2"
+VERSION = "ALPHA 0.3.10"
 
 # MODO DEBUG TEMPORAL: cuando está en True, muestra abajo de cada respuesta
 # de cursos/malla curricular un cuadro con el resultado CRUDO (sin filtrar
@@ -174,6 +174,12 @@ st.markdown(
         border-radius: 6px;
         z-index: 1000000 !important;
     }}
+    /* Separación extra debajo de la casilla de chat para que no quede
+       pegada al borde inferior del recuadro embebido. */
+    [data-testid="stBottomBlockContainer"],
+    [data-testid="stBottom"] {{
+        padding-bottom: 1.5rem !important;
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -184,7 +190,7 @@ st.markdown(f"<div class='version-esquina'>{VERSION}</div>", unsafe_allow_html=T
 col_izq, col_centro, col_der = st.columns([1, 2, 1])
 with col_centro:
     st.image("logo.png", use_container_width=True)
-st.markdown("<p class='subtitulo' style='text-align:center;'>Profesor y asistente de la plataforma</p>", unsafe_allow_html=True)
+st.markdown("<p class='subtitulo' style='text-align:center;'>La única IA especializada en contabilidad para contadores de Latinoamérica.</p>", unsafe_allow_html=True)
 
 # =========================================================
 # 3. CLIENTES DE AWS BEDROCK
@@ -217,9 +223,14 @@ if "messages" not in st.session_state:
         {
             "role": "assistant",
             "content": (
-                "¡Hola! Soy el profesor y asistente contable de la Universidad "
-                "Redcontable. Puedo ayudarte con contabilidad, finanzas y "
-                "costos. ¿En qué te ayudo?"
+                "Hola, soy la IA PACIOLI, profesor y asistente contable de "
+                "**Universidad** :red[**RED**]**Contable**.\n\n"
+                "Estoy aquí para ayudarte con tus consultas relacionadas con "
+                "contabilidad, finanzas, costos e información sobre nuestra "
+                "plataforma educativa. Asimismo, puedo orientarte utilizando "
+                "las normas contables y financieras aplicables en la "
+                "actualidad.\n\n"
+                "¿En qué puedo ayudarte?"
             ),
         }
     ]
@@ -268,13 +279,6 @@ PALABRAS_CLAVE_TEMA = [
     "ratio financ", "razon financ", "razón financ", "apalanca",
     "cxc", "cxp", "roe", "roi", "ebitda", "van", "tir",
     "declaraci\u00f3n de renta", "declaracion de renta", "sunat", "sat ",
-    # Normas para entidades sin fines de lucro (ver norma_contable_mencionada
-    # / ALIAS_NORMA_ESFL): estas palabras no llevan "nic"/"niif" pegado, as\u00ed
-    # que sin esto la capa 1 no las reconocer\u00eda y la pregunta podr\u00eda caer en
-    # la capa 2 (o, en el peor caso, rechazarse).
-    "esfl", "inpas", "inprf", "ifr4npo", "sin fines de lucro", "sin fin de lucro",
-    "organizaci\u00f3n sin fines de lucro", "organizacion sin fines de lucro",
-    "ong", "fundaci\u00f3n", "fundacion",
     # Cursos / malla curricular / plataforma: preguntas sobre la Universidad
     # Redcontable como instituci\u00f3n (no son de contabilidad en s\u00ed, pero el
     # bot tambi\u00e9n responde esto porque vive dentro de esa plataforma de
@@ -341,55 +345,45 @@ def buscar_en_malla_curricular(pregunta: str) -> str:
 
 
 # =========================================================
-# 5.c DETECCIÓN DE PREGUNTAS SOBRE UNA NORMA CONTABLE ESPECÍFICA
-#     (NIC/NIIF/NIA/IFRS/IAS/ISA + número)
+# 5.c DETECCIÓN DE PREGUNTAS SOBRE LA NIIF 18
 # =========================================================
-# Mismo problema que con la malla curricular, pero con normas: el modelo
-# puede tener información desactualizada o directamente NO conocer una norma
-# nueva (por ejemplo la NIIF 18, emitida en 2024, con vigencia a partir de
-# 2027) y, en vez de admitirlo, INVENTA con toda confianza una explicación
-# falsa (se confirmó probando el bot: afirmó que "la NIIF 18 fue reemplazada
-# por la NIIF 15", algo completamente falso e ilógico). El usuario sube a S3
-# justo los documentos oficiales de normas nuevas o específicas para cubrir
-# este vacío, así que aquí también la aplicación fuerza la búsqueda en la
-# Knowledge Base ANTES de generar la respuesta, en vez de dejarlo a
-# discreción del modelo (regla 7 del prompt).
-PATRON_NORMA_CONTABLE = re.compile(
-    r"\b(NIIF|NIC|NIA|IFRS|IAS|ISA)\s*-?\s*(\d{1,3}|ESFL)\b", re.IGNORECASE
-)
-
-# Alias sueltos (sin el prefijo NIC/NIIF) de la norma para Entidades Sin
-# Fines de Lucro: la gente la nombra de varias formas distintas (su sigla en
-# inglés, la fundación que la mantiene, o el nombre del proyecto anterior),
-# y ninguna de ellas coincide con el patrón "NIC/NIIF + número" de arriba.
-ALIAS_NORMA_ESFL = ("inpas", "inprf", "ifr4npo", "nic-esfl", "nic esfl", "esfl")
+# La NIIF 18 (Presentación e Información a Revelar en los Estados
+# Financieros) es una norma real emitida por el IASB en abril de 2024,
+# vigente para los periodos anuales que comiencen a partir del 1 de enero
+# de 2027 (reemplaza a la NIC 1). Por ser una norma reciente, el modelo
+# tiende a CONFUNDIRLA con la NIC 18 (Ingresos de Actividades Ordinarias),
+# una norma antigua y derogada desde 2018 (reemplazada por la NIIF 15), y
+# termina respondiendo -de forma incorrecta- que "la NIIF 18 no existe" o
+# que "fue reemplazada por la NIIF 15" (eso es cierto de la NIC 18, no de
+# la NIIF 18: son dos normas distintas). Igual que con la malla curricular
+# (ver es_pregunta_de_malla más arriba), no se deja a discreción del
+# modelo decidir si busca o no: la aplicación fuerza la búsqueda en la
+# Knowledge Base (donde sí hay archivos oficiales sobre la NIIF 18) antes
+# de generar la respuesta.
+PALABRAS_CLAVE_NIIF18 = ["niif 18", "niif18", "ifrs 18", "ifrs18"]
 
 
-def norma_contable_mencionada(pregunta: str):
-    """Devuelve 'NIIF 18' (por ejemplo) si la pregunta menciona una norma
-    específica con número, 'NIC ESFL' si menciona la norma para entidades
-    sin fines de lucro (con cualquiera de sus alias), o None si no menciona
-    ninguna norma específica."""
-    m = PATRON_NORMA_CONTABLE.search(pregunta)
-    if m:
-        return f"{m.group(1).upper()} {m.group(2).upper()}"
-
+def es_pregunta_de_niif18(pregunta: str) -> bool:
     texto = pregunta.lower()
-    if any(alias in texto for alias in ALIAS_NORMA_ESFL):
-        return "NIC-ESFL / INPAS (International Non-Profit Accounting Standard)"
-
-    return None
+    return any(palabra in texto for palabra in PALABRAS_CLAVE_NIIF18)
 
 
-def buscar_norma_contable(pregunta: str, norma: str) -> str:
+def buscar_niif18(pregunta: str) -> str:
     """
-    Wrapper de buscar_en_kb() para preguntas sobre una norma contable
-    específica: refuerza la consulta con el nombre exacto de la norma para
-    apuntar al documento oficial correcto (sobre todo útil para normas
-    nuevas o poco comunes que el usuario haya subido a S3).
+    Wrapper de buscar_en_kb() para preguntas sobre la NIIF 18: refuerza la
+    consulta semántica aclarando que se trata de la norma NIIF 18
+    (Presentación e Información a Revelar en los Estados Financieros,
+    IASB 2024, vigente desde 2027), y que NO debe confundirse con la NIC 18
+    (norma derogada), para que la búsqueda en la Knowledge Base apunte al
+    documento correcto en vez de quedarse en resultados genéricos o vacíos.
     """
-    consulta_reforzada = f"{pregunta} (texto oficial y aplicación de la norma {norma})"
-    return buscar_en_kb(consulta_reforzada, max_fragmentos=12)
+    consulta_reforzada = (
+        f"{pregunta} (NIIF 18 / IFRS 18, Presentación e Información a "
+        "Revelar en los Estados Financieros, norma vigente emitida por el "
+        "IASB en 2024; NO es la NIC 18, que es una norma distinta y "
+        "derogada)"
+    )
+    return buscar_en_kb(consulta_reforzada, max_fragmentos=10)
 
 
 def es_pregunta_del_tema(pregunta: str) -> bool:
@@ -522,34 +516,19 @@ PROMPT_PROFESOR = (
     "identificados que son 'materiales y generalizados' (es decir, ya hay evidencia suficiente "
     "obtenida), la respuesta correcta es SIEMPRE opinión adversa/desfavorable — la abstención de "
     "opinión es por falta de evidencia suficiente, nunca por la sola magnitud del error.\n"
-    "   - NIIF 18 vs. NIC 18 — NUNCA las confundas, son DOS normas completamente distintas y sin "
-    "relación entre sí, a pesar de compartir el número: la NIIF 18 ('Presentación y Divulgación "
-    "en los Estados Financieros' / 'Presentation and Disclosure in Financial Statements') es una "
-    "norma NUEVA, emitida por el IASB en abril de 2024, con vigencia obligatoria para periodos "
-    "que comiencen a partir del 1 de enero de 2027; su tema es cómo se estructuran y presentan "
-    "los estados financieros (nuevas categorías del estado de resultados —operativa, inversión y "
-    "financiación—, la métrica 'utilidad operativa', y requisitos de agregación/desagregación), y "
-    "REEMPLAZA a la NIC 1 (Presentación de Estados Financieros), no a la NIC 18. La NIC 18 "
-    "('Ingresos de Actividades Ordinarias' / 'Revenue'), en cambio, es una norma ANTIGUA sobre "
-    "reconocimiento de ingresos que ya fue derogada y reemplazada por la NIIF 15 desde 2018, y no "
-    "tiene ninguna relación con la NIIF 18. Si el usuario pregunta por la 'NIIF 18' (o 'IFRS 18'), "
-    "trátala siempre como la norma nueva de presentación de estados financieros que reemplaza a la "
-    "NIC 1 — nunca como si fuera una actualización o sucesora de la NIC 18, ni mezcles el "
-    "contenido de una con la otra.\n"
-    "   - NIC-ESFL / INPAS (norma para Entidades Sin Fines de Lucro) — ESTA NORMA SÍ EXISTE, no la "
-    "niegues ni digas que es un error tipográfico del usuario. Su nombre completo en inglés es "
-    "'International Non-Profit Accounting Standard' (INPAS), también conocida en español como "
-    "'NIC-ESFL' (Norma Internacional de Contabilidad para Entidades Sin Fines de Lucro) o por su "
-    "nombre de proyecto anterior 'IFR4NPO'. Es el primer estándar contable global diseñado "
-    "específicamente para organizaciones sin fines de lucro (ONG, fundaciones, entidades benéficas), "
-    "publicado en octubre de 2025 y mantenido por la INPRF (International Non-Profit Reporting "
-    "Foundation). No es una NIC, NIIF ni NIA emitida por el IASB — es un cuerpo normativo aparte, "
-    "pensado para llenar el vacío de que las NIIF/US GAAP tradicionales están diseñadas para "
-    "empresas con fines de lucro. Si la pregunta menciona 'NIC ESFL', 'NIC-ESFL', 'INPAS', 'INPRF' "
-    "o 'entidades sin fines de lucro' junto con normas contables, SIEMPRE apóyate en el resultado de "
-    "la búsqueda en los archivos oficiales (la aplicación la fuerza automáticamente para estos "
-    "términos, ver más abajo) antes de responder, porque es una norma muy reciente y es probable que "
-    "tu conocimiento general sobre ella sea incompleto o inexistente.\n"
+    "   - NIIF 18 vs. NIC 18 — NO SON LA MISMA NORMA, cuidado con esta confusión: la NIIF 18 "
+    "(Presentación e Información a Revelar en los Estados Financieros) SÍ EXISTE, es una norma "
+    "vigente emitida por el IASB en abril de 2024, aplicable a los periodos anuales que comiencen "
+    "a partir del 1 de enero de 2027, y reemplaza a la NIC 1. Introduce, entre otros cambios, tres "
+    "categorías obligatorias en el estado de resultados (operativa, de inversión y de "
+    "financiamiento), el requisito de presentar 'medidas de rendimiento definidas por la gerencia' "
+    "(MPMs) con su conciliación, y nuevos principios de agregación y desagregación de partidas. La "
+    "NIC 18 (Ingresos de Actividades Ordinarias), en cambio, es una norma DISTINTA y ANTIGUA, "
+    "derogada en 2018 y reemplazada por la NIIF 15 (ver el punto anterior) — pero esa derogación "
+    "es de la NIC 18, no tiene nada que ver con la NIIF 18. NUNCA digas que la NIIF 18 no existe, "
+    "que fue reemplazada por la NIIF 15, o que es lo mismo que la NIC 18: son dos normas "
+    "completamente distintas, sobre temas distintos (presentación de estados financieros vs. "
+    "ingresos), separadas por más de dos décadas de diferencia entre una y otra.\n"
     "4. SIEMPRE que tu respuesta se apoye en una norma técnica (NIC, NIIF, NIA, US GAAP/ASC, "
     "COSO, etc.), menciona explícitamente dentro del texto el nombre y número de esa norma como "
     "parte natural de la explicación (por ejemplo: 'según la NIC 16, párrafo 39...' o 'conforme "
@@ -576,6 +555,11 @@ PROMPT_PROFESOR = (
     "seguidos dentro de una sola oración larga. Ejemplo de qué hacer: presentarlos como una lista "
     "corta, cada uno en su propia línea con viñeta, y una frase de cierre aparte con la "
     "conclusión.\n"
+    "   - MONEDA: cada vez que menciones un monto en dólares, en CUALQUIER parte de tu respuesta "
+    "(explicaciones, ejemplos, listas, y también en las tablas de asientos contables), usa siempre "
+    "el símbolo simple '$' — NUNCA escribas 'US$', 'USD' ni 'US $'. Solo usa un símbolo distinto a "
+    "'$' cuando el ejercicio o la pregunta mencionen explícitamente otra moneda (por ejemplo soles "
+    "'S/', euros '€' o pesos), y en ese caso usa el símbolo de esa moneda, no el de dólares.\n"
     "6. ASIENTOS CONTABLES Y CUADROS DE PARTIDA DOBLE (Debe/Haber) — cuando debas mostrar un "
     "asiento contable o un cuadro de partida doble, sigue estas reglas de forma ESTRICTA, sin "
     "excepción:\n"
@@ -585,7 +569,9 @@ PROMPT_PROFESOR = (
     "numérico. El código de cuenta pertenece al plan de cuentas interno de cada empresa (varía de "
     "una a otra) y no aporta nada a la explicación pedagógica; solo genera confusión.\n"
     "   - Presenta el asiento como una tabla markdown con exactamente estas columnas: 'Cuenta', "
-    "'Debe (US$)' y 'Haber (US$)' (ajusta la moneda si el ejercicio usa otra).\n"
+    "'Debe ($)' y 'Haber ($)'. Usa siempre el símbolo simple '$' (nunca escribas 'US$' ni el "
+    "código de moneda 'USD'), salvo que el ejercicio mencione explícitamente otra moneda distinta "
+    "al dólar (por ejemplo soles, euros o pesos) — en ese caso usa el símbolo de esa moneda.\n"
     "   - Antes de escribir la tabla, calcula mentalmente (paso a paso, con cuidado) el monto "
     "que corresponde a cada cuenta, y luego SUMA todos los montos que vas a poner en la columna "
     "Debe y todos los que vas a poner en la columna Haber. Ambos totales deben ser EXACTAMENTE "
@@ -636,32 +622,52 @@ PROMPT_PROFESOR = (
     "acompaña cada uno de una frase breve de por qué es relevante (nunca los enumeres en seco sin "
     "explicación). Cierra, si es natural, con una frase corta invitando a preguntar por el "
     "contenido específico del curso o por otros relacionados.\n"
-    "   Fuera de ese caso especial, uses o no la herramienta, responde SIEMPRE de forma "
+    "   CASO ESPECIAL — NIIF 18: para estas preguntas la aplicación YA hizo la búsqueda por ti de "
+    "forma automática y te la agregó al mensaje del usuario como '[Resultado de la búsqueda en los "
+    "archivos oficiales sobre la NIIF 18:]' — NO necesitas (ni debes) usar la herramienta "
+    "buscar_en_archivos otra vez para esto; hacerlo de nuevo solo repite una búsqueda que ya se "
+    "hizo y demora la respuesta sin necesidad. Responde directamente con ese resultado (recuerda: "
+    "la NIIF 18 sí existe y es distinta a la NIC 18, ver el caso de la regla 3).\n"
+    "   Fuera de esos casos especiales, uses o no la herramienta, responde SIEMPRE de forma "
     "directa y natural, como si tú ya supieras la información de memoria: NUNCA menciones que "
     "usaste una herramienta, que consultaste algo, ni frases como 'según los documentos "
     "cargados...', 'según los archivos del sistema...', 'consulté la base de datos...' o "
     "similares — ni aunque hayas encontrado algo relevante, ni aunque no hayas encontrado nada. "
     "El usuario no debe notar ninguna diferencia entre una respuesta que viene de tu conocimiento "
     "y una que se apoyó en la herramienta; simplemente responde el contenido.\n"
-    "8. NUNCA muestres tu razonamiento interno como texto visible: no uses etiquetas ni bloques "
-    "como '<thinking>', '<razonamiento>', '[pensando]', 'Chain of Thought:' o similares, ni "
-    "escribas frases tipo 'Dado que...' explicando cómo decidiste responder antes de dar la "
-    "respuesta. Ve directo a la respuesta final, redactada de forma natural, sin exponer los "
-    "pasos internos de tu análisis.\n"
-    "9. NORMAS CONTABLES NUEVAS O POCO COMUNES (por ejemplo NIIF 18, NIC-ESFL/INPAS, u otra norma "
-    "reciente): tu conocimiento tiene una fecha de corte y puede NO incluir normas emitidas después "
-    "de esa fecha, o puede tener información incompleta sobre normas poco comunes. NUNCA afirmes "
-    "que una norma 'fue reemplazada por' otra, ni inventes su contenido, alcance o fecha de "
-    "vigencia, basándote solo en que el número o el nombre te resulta parecido a otra norma que sí "
-    "conoces bien. NUNCA le digas al usuario que una norma 'no existe' o que fue un 'error "
-    "tipográfico' solo porque tú no la reconoces de memoria — es un error grave asumir que tu "
-    "desconocimiento significa que la norma no existe, sobre todo si hay un resultado de búsqueda en "
-    "los archivos oficiales que sí la menciona (revísalo con cuidado antes de descartar la norma). "
-    "Si no tienes certeza sobre una norma específica y no hay un resultado de búsqueda que la "
-    "respalde, dilo con honestidad en vez de adivinar o negar su existencia — es preferible admitir "
-    "que no tienes información confiable sobre esa norma en particular que inventar una explicación "
-    "incorrecta o desmentirla sin fundamento."
+    "8. NUNCA muestres tu razonamiento interno ni narres cómo vas a construir la respuesta. Esto "
+    "incluye, sin excepción: bloques como '<thinking>...</thinking>' o similares, frases del tipo "
+    "'el usuario está pidiendo...', 'el usuario pide...', 'voy a calcular...', 'ahora crearé...', "
+    "listas numeradas de pasos que vas a seguir para responder, o cualquier meta-comentario sobre "
+    "tu propio proceso. Todo cálculo, verificación o análisis previo (por ejemplo, el cálculo "
+    "mental de un asiento contable de la regla 6) debe hacerse de forma completamente interna y "
+    "SILENCIOSA: tu respuesta debe empezar DIRECTAMENTE con el contenido final para el usuario "
+    "(la explicación, la tabla del asiento, etc.), sin ningún preámbulo sobre qué vas a hacer o "
+    "cómo lo vas a resolver."
 )
+
+
+# Nova Pro, sobre todo en preguntas que piden calcular algo (como un asiento
+# contable), a veces antepone un bloque de razonamiento interno visible del
+# tipo "<thinking>...</thinking>" antes de la respuesta real, aunque el
+# prompt (ver regla 8 de PROMPT_PROFESOR) le pida explícitamente no hacerlo.
+# Esta expresión regular es una RED DE SEGURIDAD a nivel de código: si ese
+# bloque aparece de todos modos, se elimina antes de mostrarle nada al
+# usuario. re.DOTALL para que ".*?" también capture saltos de línea dentro
+# del bloque.
+_PATRON_BLOQUE_PENSAMIENTO = re.compile(
+    r"<\s*thinking\s*>.*?<\s*/\s*thinking\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def quitar_bloque_pensamiento(texto: str) -> str:
+    """
+    Elimina cualquier bloque "<thinking>...</thinking>" (razonamiento
+    interno que el modelo no debería mostrar) del texto de respuesta, y
+    recorta espacios en blanco sobrantes que puedan quedar al inicio.
+    """
+    return _PATRON_BLOQUE_PENSAMIENTO.sub("", texto).strip()
 
 
 def escapar_signos_dolar(texto: str) -> str:
@@ -670,30 +676,19 @@ def escapar_signos_dolar(texto: str) -> str:
     dentro de st.markdown(). Si la respuesta menciona precios como "$20" y
     más adelante "$24", todo lo que queda entre ambos signos se renderiza
     como una sola ecuación gigante (texto desbordado, en cursiva, pegado).
-    Escapamos cada "$" como "\\$" para que Streamlit lo muestre literal.
+
+    Al principio probamos escapar cada "$" como "\\$", pero en la práctica
+    Streamlit NO oculta la barra invertida al renderizar: el usuario termina
+    viendo literalmente "\$3,659.94" en pantalla (con la barra incluida),
+    un comportamiento conocido de Streamlit (no interpreta "\$" como un
+    escape real de Markdown). Por eso, en vez de escapar el símbolo,
+    reemplazamos cada "$" por "﹩" (U+FE69, "small dollar sign"): es un
+    carácter Unicode distinto que se ve prácticamente igual a un signo de
+    dólar normal, pero que Streamlit no reconoce como el "$" que dispara el
+    modo LaTeX, así que nunca genera ni la fórmula gigante ni ningún
+    carácter de escape visible.
     """
-    return texto.replace("$", r"\$")
-
-
-# Patrón defensivo: aunque la regla 8 de PROMPT_PROFESOR le prohíbe al modelo
-# mostrar su razonamiento interno, un prompt por sí solo no es 100% confiable
-# (ya se vio con la instrucción de "no inventes cursos", que a veces se
-# ignoraba). Por eso además se limpia programáticamente cualquier bloque
-# '<thinking>...</thinking>' (o variantes) que se cuele en la respuesta,
-# como red de seguridad adicional.
-_PATRON_THINKING = re.compile(
-    r"<\s*(thinking|razonamiento|pensamiento)\s*>.*?<\s*/\s*\1\s*>",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def quitar_bloques_pensamiento(texto: str) -> str:
-    """Elimina cualquier bloque de razonamiento interno tipo '<thinking>...
-    </thinking>' que el modelo haya incluido por error en la respuesta
-    visible, y limpia los espacios/saltos de línea sobrantes que deja."""
-    limpio = _PATRON_THINKING.sub("", texto)
-    limpio = re.sub(r"\n{3,}", "\n\n", limpio).strip()
-    return limpio
+    return texto.replace("$", "﹩")
 
 
 # Cuántos intercambios anteriores (pregunta del usuario + respuesta del bot)
@@ -903,7 +898,9 @@ def _llamar_converse_con_herramientas(system_prompt: str, mensajes: list) -> str
         bloques = response.get("output", {}).get("message", {}).get("content", [])
 
         if response.get("stopReason") != "tool_use":
-            return "".join(b.get("text", "") for b in bloques).strip()
+            return quitar_bloque_pensamiento(
+                "".join(b.get("text", "") for b in bloques).strip()
+            )
 
         # El modelo pidió usar la herramienta: se agrega su turno (con el
         # bloque toolUse) y se le responde con el resultado de la búsqueda.
@@ -920,7 +917,7 @@ def _llamar_converse_con_herramientas(system_prompt: str, mensajes: list) -> str
         inferenceConfig={"maxTokens": 4000, "temperature": 0.0},
     )
     bloques = response.get("output", {}).get("message", {}).get("content", [])
-    return "".join(b.get("text", "") for b in bloques).strip()
+    return quitar_bloque_pensamiento("".join(b.get("text", "") for b in bloques).strip())
 
 
 def generar_respuesta_final(pregunta: str) -> str:
@@ -935,7 +932,10 @@ def generar_respuesta_final(pregunta: str) -> str:
     es_pregunta_de_malla), se hace la búsqueda en la Knowledge Base de
     forma OBLIGATORIA aquí mismo, en vez de dejarle esa decisión al modelo:
     esto evita que invente un curso/código/contenido que no existe cuando
-    decide (por su cuenta) no usar la herramienta buscar_en_archivos. Para
+    decide (por su cuenta) no usar la herramienta buscar_en_archivos. Lo
+    mismo se hace para preguntas sobre la NIIF 18 (ver es_pregunta_de_niif18),
+    ya que el modelo tiende a confundirla con la NIC 18 (derogada) y a
+    responder que no existe en vez de buscar los archivos oficiales. Para
     cualquier otra pregunta, el modelo sigue teniendo esa herramienta
     disponible por si la necesita (ver _llamar_converse_con_herramientas).
     """
@@ -956,26 +956,23 @@ def generar_respuesta_final(pregunta: str) -> str:
             "contenido que no aparezca literalmente en el resultado de arriba."
         )
 
-    norma = norma_contable_mencionada(pregunta)
-    if norma:
-        resultado_norma = buscar_norma_contable(pregunta, norma)
+    if es_pregunta_de_niif18(pregunta):
+        resultado_busqueda_niif18 = buscar_niif18(pregunta)
         if MODO_DEBUG_KB:
-            st.session_state["debug_ultima_busqueda_kb"] = resultado_norma
+            st.session_state["debug_ultima_busqueda_kb"] = resultado_busqueda_niif18
         texto_usuario += (
-            f"\n\n[Resultado de la búsqueda en los archivos oficiales sobre {norma}:]\n"
-            f"{resultado_norma}\n\n"
-            f"INSTRUCCIÓN CRÍTICA sobre {norma}: puede ser una norma nueva, poco común, "
-            "o que se emitió después de tu fecha de conocimiento — en ese caso tu "
-            "memoria sobre ella puede ser incompleta, estar desactualizada o "
-            "simplemente no existir, aunque te 'suene' a algo. NUNCA afirmes que una "
-            "norma 'fue reemplazada por' otra, ni describas su contenido, alcance o "
-            "fecha de vigencia, a menos que el resultado de la búsqueda de arriba lo "
-            "confirme explícitamente. Si el resultado NO trae información suficiente "
-            f"sobre {norma}, dilo con toda honestidad (por ejemplo: 'no tengo "
-            f"información confiable y verificada sobre {norma} en este momento') y "
-            "sugiere consultar el texto oficial de IFAC/IASB o los documentos "
-            "cargados en la plataforma. Inventar detalles de una norma contable es un "
-            "error grave: puede enseñar mal a un estudiante."
+            "\n\n[Resultado de la búsqueda en los archivos oficiales sobre la "
+            f"NIIF 18:]\n{resultado_busqueda_niif18}\n\n"
+            "INSTRUCCIÓN CRÍTICA: la NIIF 18 (Presentación e Información a Revelar "
+            "en los Estados Financieros) SÍ EXISTE: es una norma vigente, emitida "
+            "por el IASB en 2024 y aplicable desde 2027, que reemplaza a la NIC 1. "
+            "Es una norma COMPLETAMENTE DISTINTA a la NIC 18 (Ingresos de "
+            "Actividades Ordinarias), que es la que fue derogada en 2018 y "
+            "reemplazada por la NIIF 15. NUNCA digas que la NIIF 18 no existe, que "
+            "fue reemplazada por la NIIF 15, ni la trates como sinónimo de la NIC "
+            "18. Usa el resultado de la búsqueda de arriba para responder con la "
+            "información oficial de la institución; si ese resultado no trae el "
+            "dato exacto que se pregunta, dilo con honestidad en vez de inventarlo."
         )
 
     mensajes = construir_historial_bedrock() + [
@@ -1095,20 +1092,21 @@ def analizar_imagen(pregunta: str, archivo) -> str:
             "aparezca literalmente ahí."
         )
 
-    # Igual que arriba, pero para preguntas sobre una norma contable
-    # específica (NIC/NIIF/NIA + número) acompañando al adjunto.
-    norma = norma_contable_mencionada(pregunta) if pregunta else None
-    if norma:
-        resultado_norma = buscar_norma_contable(pregunta, norma)
+    # Igual que arriba: si la pregunta que acompaña al adjunto es sobre la
+    # NIIF 18, se busca en la Knowledge Base de forma OBLIGATORIA (ver
+    # es_pregunta_de_niif18 y buscar_niif18), para que el modelo no la
+    # confunda con la NIC 18 (derogada) y sí use los archivos oficiales.
+    if pregunta and es_pregunta_de_niif18(pregunta):
+        resultado_busqueda_niif18 = buscar_niif18(pregunta)
         if MODO_DEBUG_KB:
-            st.session_state["debug_ultima_busqueda_kb"] = resultado_norma
+            st.session_state["debug_ultima_busqueda_kb"] = resultado_busqueda_niif18
         texto_usuario += (
-            f"\n\n[Resultado de la búsqueda en los archivos oficiales sobre {norma}:]\n"
-            f"{resultado_norma}\n\n"
-            f"INSTRUCCIÓN CRÍTICA sobre {norma}: si el resultado anterior NO trae "
-            "información suficiente, dilo con honestidad en vez de inventar el "
-            "contenido, alcance o vigencia de la norma, o afirmar que fue "
-            "reemplazada por otra sin evidencia de ello."
+            "\n\n[Resultado de la búsqueda en los archivos oficiales sobre la "
+            f"NIIF 18:]\n{resultado_busqueda_niif18}\n\n"
+            "INSTRUCCIÓN CRÍTICA: la NIIF 18 SÍ EXISTE, es una norma vigente "
+            "emitida por el IASB en 2024 (aplicable desde 2027) y es distinta a "
+            "la NIC 18 (derogada, reemplazada por la NIIF 15). Nunca digas que "
+            "la NIIF 18 no existe ni la confundas con la NIC 18."
         )
 
     contenido = [
@@ -1214,7 +1212,6 @@ if entrada:
                         except Exception as e:
                             full_response = f"⚠️ Error al generar la respuesta: {e}"
 
-            full_response = quitar_bloques_pensamiento(full_response)
             full_response = escapar_signos_dolar(full_response)
             message_placeholder.markdown(full_response)
 
