@@ -73,7 +73,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.3.11"
+VERSION = "ALPHA 0.3.12"
 
 # MODO DEBUG TEMPORAL: cuando está en True, muestra abajo de cada respuesta
 # de cursos/malla curricular un cuadro con el resultado CRUDO (sin filtrar
@@ -688,7 +688,11 @@ PROMPT_PROFESOR = (
     "INPAS:]' — NO uses la herramienta buscar_en_archivos otra vez para esto. Responde DIRECTO con "
     "el contenido de ese resultado, como si ya lo supieras de memoria: nunca digas frases como "
     "'según los archivos del sistema', 'según los documentos cargados', 'consulté la base de "
-    "datos' ni nada similar (recuerda: la NIC-ESFL / INPAS sí existe, ver el caso de la regla 3).\n"
+    "datos', 'según el resultado de la búsqueda...', 'según los archivos oficiales sobre la "
+    "NIC-ESFL...' ni nada similar que delate que hubo una búsqueda o un resultado (recuerda: la "
+    "NIC-ESFL / INPAS sí existe, ver el caso de la regla 3). Tampoco cierres la respuesta "
+    "invitando a revisar cursos o contenidos de la plataforma relacionados con el tema — eso solo "
+    "aplica al caso especial de cursos/malla curricular de arriba, no a este.\n"
     "   Fuera de esos casos especiales, uses o no la herramienta, responde SIEMPRE de forma "
     "directa y natural, como si tú ya supieras la información de memoria: NUNCA menciones que "
     "usaste una herramienta, que consultaste algo, ni frases como 'según los documentos "
@@ -1047,10 +1051,17 @@ def generar_respuesta_final(pregunta: str) -> str:
             "'International Non-Profit Accounting Standard') SÍ EXISTE: es la "
             "norma contable para Entidades Sin Fines de Lucro, publicada en 2025 "
             "por la INPRF. NUNCA digas que no existe ni que es un error "
-            "tipográfico del usuario. Usa el resultado de la búsqueda de arriba "
-            "para responder con la información oficial de la institución; si ese "
-            "resultado no trae el dato exacto que se pregunta, dilo con "
-            "honestidad en vez de inventarlo."
+            "tipográfico del usuario. Usa el contenido de arriba para responder "
+            "con la información oficial de la institución, redactado como si ya "
+            "lo supieras de memoria; si ese contenido no trae el dato exacto que "
+            "se pregunta, dilo con honestidad en vez de inventarlo. NUNCA "
+            "menciones ni parafrasees que hubo una 'búsqueda', unos 'archivos "
+            "oficiales' o un 'resultado' (nada de 'según el resultado de la "
+            "búsqueda...', 'según los archivos oficiales sobre la NIC-ESFL...', "
+            "ni similares): responde directo con el contenido, sin esa "
+            "referencia. Tampoco cierres la respuesta invitando a revisar cursos "
+            "o contenidos de la plataforma relacionados — eso solo aplica al "
+            "caso especial de cursos/malla curricular, no a este."
         )
 
     mensajes = construir_historial_bedrock() + [
@@ -1200,7 +1211,12 @@ def analizar_imagen(pregunta: str, archivo) -> str:
             f"NIC-ESFL / INPAS:]\n{resultado_busqueda_nicesfl}\n\n"
             "INSTRUCCIÓN CRÍTICA: la NIC-ESFL / INPAS SÍ EXISTE, es la norma "
             "contable para Entidades Sin Fines de Lucro publicada en 2025 por la "
-            "INPRF. Nunca digas que no existe ni que es un error tipográfico."
+            "INPRF. Nunca digas que no existe ni que es un error tipográfico. "
+            "NUNCA menciones ni parafrasees que hubo una 'búsqueda', unos "
+            "'archivos oficiales' o un 'resultado' (nada de 'según el resultado "
+            "de la búsqueda...', 'según los archivos oficiales...'): responde "
+            "directo con el contenido. Tampoco cierres la respuesta invitando a "
+            "revisar cursos o contenidos de la plataforma relacionados."
         )
 
     contenido = [
