@@ -73,7 +73,7 @@ MODEL_ARN_GENERACION = f"arn:aws:bedrock:{AWS_REGION}::foundation-model/amazon.n
 
 # Versión del asistente. Se sube +0.0.01 cada vez que se hace una corrección
 # o ajuste al comportamiento/prompt del modelo.
-VERSION = "ALPHA 0.3.10"
+VERSION = "ALPHA 0.3.11"
 
 # MODO DEBUG TEMPORAL: cuando está en True, muestra abajo de cada respuesta
 # de cursos/malla curricular un cuadro con el resultado CRUDO (sin filtrar
@@ -279,6 +279,10 @@ PALABRAS_CLAVE_TEMA = [
     "ratio financ", "razon financ", "razón financ", "apalanca",
     "cxc", "cxp", "roe", "roi", "ebitda", "van", "tir",
     "declaraci\u00f3n de renta", "declaracion de renta", "sunat", "sat ",
+    # NIC-ESFL / INPAS (norma para entidades sin fines de lucro, ver
+    # es_pregunta_de_nicesfl): "esfl" e "inpas"/"inprf" no contienen "nic",
+    # as\u00ed que sin esto la capa 1 no las reconocer\u00eda.
+    "esfl", "inpas", "inprf", "ifr4npo",
     # Cursos / malla curricular / plataforma: preguntas sobre la Universidad
     # Redcontable como instituci\u00f3n (no son de contabilidad en s\u00ed, pero el
     # bot tambi\u00e9n responde esto porque vive dentro de esa plataforma de
@@ -382,6 +386,45 @@ def buscar_niif18(pregunta: str) -> str:
         "Revelar en los Estados Financieros, norma vigente emitida por el "
         "IASB en 2024; NO es la NIC 18, que es una norma distinta y "
         "derogada)"
+    )
+    return buscar_en_kb(consulta_reforzada, max_fragmentos=10)
+
+
+# =========================================================
+# 5.d DETECCIÓN DE PREGUNTAS SOBRE LA NIC-ESFL / INPAS
+# =========================================================
+# La NIC-ESFL (también llamada INPAS, "International Non-Profit Accounting
+# Standard") es la norma para Entidades Sin Fines de Lucro: la primera norma
+# contable global diseñada específicamente para ONG, fundaciones y entidades
+# benéficas, publicada en octubre de 2025 y mantenida por la INPRF
+# (International Non-Profit Reporting Foundation). Por ser tan reciente, el
+# modelo no la conoce de memoria y tiende a responder que "no existe" o que
+# es un error tipográfico del usuario, en vez de admitir que no la conoce.
+# Igual que con la malla curricular y la NIIF 18 (ver arriba), no se deja a
+# discreción del modelo decidir si busca o no: la aplicación fuerza la
+# búsqueda en la Knowledge Base (donde sí hay guías prácticas sobre la
+# NIC-ESFL) antes de generar la respuesta.
+PALABRAS_CLAVE_NICESFL = [
+    "nic esfl", "nic-esfl", "nicesfl", "esfl", "inpas", "inprf", "ifr4npo",
+]
+
+
+def es_pregunta_de_nicesfl(pregunta: str) -> bool:
+    texto = pregunta.lower()
+    return any(palabra in texto for palabra in PALABRAS_CLAVE_NICESFL)
+
+
+def buscar_nicesfl(pregunta: str) -> str:
+    """
+    Wrapper de buscar_en_kb() para preguntas sobre la NIC-ESFL / INPAS:
+    refuerza la consulta semántica aclarando de qué norma se trata (para que
+    la búsqueda no se quede en resultados genéricos o vacíos) y que SÍ existe,
+    para que el modelo no la descarte como un error del usuario.
+    """
+    consulta_reforzada = (
+        f"{pregunta} (NIC-ESFL / INPAS, International Non-Profit Accounting "
+        "Standard, norma contable para Entidades Sin Fines de Lucro, "
+        "publicada en 2025 por la INPRF)"
     )
     return buscar_en_kb(consulta_reforzada, max_fragmentos=10)
 
@@ -529,6 +572,17 @@ PROMPT_PROFESOR = (
     "que fue reemplazada por la NIIF 15, o que es lo mismo que la NIC 18: son dos normas "
     "completamente distintas, sobre temas distintos (presentación de estados financieros vs. "
     "ingresos), separadas por más de dos décadas de diferencia entre una y otra.\n"
+    "   - NIC-ESFL / INPAS (norma para Entidades Sin Fines de Lucro) — ESTA NORMA SÍ EXISTE, NUNCA "
+    "digas que no existe ni que es un error tipográfico del usuario. Su nombre completo en inglés "
+    "es 'International Non-Profit Accounting Standard' (INPAS), también conocida en español como "
+    "'NIC-ESFL'. Es el primer estándar contable global diseñado específicamente para "
+    "organizaciones sin fines de lucro (ONG, fundaciones, entidades benéficas), publicado en "
+    "octubre de 2025 y mantenido por la INPRF (International Non-Profit Reporting Foundation). No "
+    "es una NIC, NIIF ni NIA emitida por el IASB — es un cuerpo normativo aparte, pensado para "
+    "llenar el vacío de que las NIIF/US GAAP tradicionales están diseñadas para empresas con fines "
+    "de lucro. Por ser una norma muy reciente, tu conocimiento general sobre ella puede ser "
+    "incompleto o inexistente: apóyate siempre en el resultado de la búsqueda en los archivos "
+    "oficiales (ver el caso especial en la regla 7) antes de responder.\n"
     "4. SIEMPRE que tu respuesta se apoye en una norma técnica (NIC, NIIF, NIA, US GAAP/ASC, "
     "COSO, etc.), menciona explícitamente dentro del texto el nombre y número de esa norma como "
     "parte natural de la explicación (por ejemplo: 'según la NIC 16, párrafo 39...' o 'conforme "
@@ -628,6 +682,13 @@ PROMPT_PROFESOR = (
     "buscar_en_archivos otra vez para esto; hacerlo de nuevo solo repite una búsqueda que ya se "
     "hizo y demora la respuesta sin necesidad. Responde directamente con ese resultado (recuerda: "
     "la NIIF 18 sí existe y es distinta a la NIC 18, ver el caso de la regla 3).\n"
+    "   CASO ESPECIAL — NIC-ESFL / INPAS: igual que en el caso anterior, para estas preguntas la "
+    "aplicación YA hizo la búsqueda por ti de forma automática y te la agregó al mensaje del "
+    "usuario como '[Resultado de la búsqueda en los archivos oficiales sobre la NIC-ESFL / "
+    "INPAS:]' — NO uses la herramienta buscar_en_archivos otra vez para esto. Responde DIRECTO con "
+    "el contenido de ese resultado, como si ya lo supieras de memoria: nunca digas frases como "
+    "'según los archivos del sistema', 'según los documentos cargados', 'consulté la base de "
+    "datos' ni nada similar (recuerda: la NIC-ESFL / INPAS sí existe, ver el caso de la regla 3).\n"
     "   Fuera de esos casos especiales, uses o no la herramienta, responde SIEMPRE de forma "
     "directa y natural, como si tú ya supieras la información de memoria: NUNCA menciones que "
     "usaste una herramienta, que consultaste algo, ni frases como 'según los documentos "
@@ -975,6 +1036,23 @@ def generar_respuesta_final(pregunta: str) -> str:
             "dato exacto que se pregunta, dilo con honestidad en vez de inventarlo."
         )
 
+    if es_pregunta_de_nicesfl(pregunta):
+        resultado_busqueda_nicesfl = buscar_nicesfl(pregunta)
+        if MODO_DEBUG_KB:
+            st.session_state["debug_ultima_busqueda_kb"] = resultado_busqueda_nicesfl
+        texto_usuario += (
+            "\n\n[Resultado de la búsqueda en los archivos oficiales sobre la "
+            f"NIC-ESFL / INPAS:]\n{resultado_busqueda_nicesfl}\n\n"
+            "INSTRUCCIÓN CRÍTICA: la NIC-ESFL (también llamada INPAS, "
+            "'International Non-Profit Accounting Standard') SÍ EXISTE: es la "
+            "norma contable para Entidades Sin Fines de Lucro, publicada en 2025 "
+            "por la INPRF. NUNCA digas que no existe ni que es un error "
+            "tipográfico del usuario. Usa el resultado de la búsqueda de arriba "
+            "para responder con la información oficial de la institución; si ese "
+            "resultado no trae el dato exacto que se pregunta, dilo con "
+            "honestidad en vez de inventarlo."
+        )
+
     mensajes = construir_historial_bedrock() + [
         {"role": "user", "content": [{"text": texto_usuario}]}
     ]
@@ -1107,6 +1185,22 @@ def analizar_imagen(pregunta: str, archivo) -> str:
             "emitida por el IASB en 2024 (aplicable desde 2027) y es distinta a "
             "la NIC 18 (derogada, reemplazada por la NIIF 15). Nunca digas que "
             "la NIIF 18 no existe ni la confundas con la NIC 18."
+        )
+
+    # Igual que arriba: si la pregunta que acompaña al adjunto es sobre la
+    # NIC-ESFL / INPAS, se busca en la Knowledge Base de forma OBLIGATORIA
+    # (ver es_pregunta_de_nicesfl y buscar_nicesfl), para que el modelo no
+    # niegue su existencia y sí use los archivos oficiales.
+    if pregunta and es_pregunta_de_nicesfl(pregunta):
+        resultado_busqueda_nicesfl = buscar_nicesfl(pregunta)
+        if MODO_DEBUG_KB:
+            st.session_state["debug_ultima_busqueda_kb"] = resultado_busqueda_nicesfl
+        texto_usuario += (
+            "\n\n[Resultado de la búsqueda en los archivos oficiales sobre la "
+            f"NIC-ESFL / INPAS:]\n{resultado_busqueda_nicesfl}\n\n"
+            "INSTRUCCIÓN CRÍTICA: la NIC-ESFL / INPAS SÍ EXISTE, es la norma "
+            "contable para Entidades Sin Fines de Lucro publicada en 2025 por la "
+            "INPRF. Nunca digas que no existe ni que es un error tipográfico."
         )
 
     contenido = [
